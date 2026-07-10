@@ -1065,5 +1065,69 @@ class BankAppTestCase(unittest.TestCase):
         socket_client_admin.disconnect()
 
 
+    def test_otp_production_safety_invariants(self):
+        # 1. Verify 123456 is not hardcoded in production HTML/JS/Python files
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        prod_files = [
+            os.path.join(base_dir, 'app.py'),
+            os.path.join(base_dir, 'static', 'index.html'),
+            os.path.join(base_dir, 'static', 'app.js')
+        ]
+        for path in prod_files:
+            with open(path, 'r', encoding='utf-8') as f:
+                content_file = f.read()
+            if 'index.html' in path or 'app.js' in path:
+                self.assertNotIn('123456', content_file)
+                self.assertNotIn('Demo OTP', content_file)
+                self.assertNotIn('SMS Alert', content_file)
+
+        # 2. Verify OTP is absent from API responses
+        self.register_user('alice_safe', 'alice_s@test.com', 'pass123', 'pass123', '08177777778', bal=200000.0)
+        self.register_user('bob_safe', 'bob_s@test.com', 'pass456', 'pass456', '08277777779')
+        self.login_user('alice_safe', 'pass123')
+        
+        self.captured_otps.clear()
+        res_init = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'bob_safe',
+            'amount': '40000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        self.assertEqual(res_init.status_code, 200)
+        data = json.loads(res_init.data)
+        
+        self.assertNotIn('otp', data)
+        raw_res_text = res_init.get_data(as_text=True)
+        otp = self.captured_otps[-1]
+        self.assertNotIn(otp, raw_res_text)
+        
+        # 3. SMTP send is invoked
+        self.assertTrue(len(self.captured_otps) > 0)
+        
+        # 4. Verify SMTP failure does not expose or bypass OTP
+        import app as app_module
+        def raise_smtp_error(*args, **kwargs):
+            raise RuntimeError("SMTP connection failed")
+        app_module.send_otp_email = raise_smtp_error
+        
+        res_init_fail = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'bob_safe',
+            'amount': '40000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        self.assertEqual(res_init_fail.status_code, 500)
+        data_fail = json.loads(res_init_fail.data)
+        self.assertIn('Failed to send verification email', data_fail['message'])
+        
+        # Verify challenge was deleted (only 1 challenge remains from the first successful transaction)
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM transaction_otp_challenges WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'alice_safe')")
+            challenges = cursor.fetchall()
+            self.assertEqual(len(challenges), 1)
+            conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()

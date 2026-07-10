@@ -784,12 +784,10 @@
                     <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 12px; text-align: center;">
                         This transaction requires additional security verification.
                     </p>
-                    <div class="simulated-otp-alert" id="mfaSimulatedOtpAlert" style="background: rgba(0, 245, 212, 0.08); border: 1px solid rgba(0, 245, 212, 0.2); border-radius: 8px; padding: 12px; margin-bottom: 18px; text-align: center; font-size: 0.85rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;">
-                        <span style="color: var(--text-secondary);"><i class="fa-solid fa-envelope"></i> Verification Code Sent To:</span>
-                        <strong id="mfaMaskedEmail" style="font-size: 1.05rem; letter-spacing: 1px; color: #fff;">s***n@gmail.com</strong>
-                        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px;">
-                            Expires in: <span id="mfaOtpTimer" style="font-weight: bold; color: #00f5d4;">05:00</span>
-                        </div>
+                    <div class="simulated-otp-alert" id="mfaSimulatedOtpAlert" style="background: rgba(155, 93, 229, 0.08); border: 1px solid rgba(155, 93, 229, 0.2); border-radius: 8px; padding: 14px; margin-bottom: 18px; text-align: center; font-size: 0.9rem; color: #fff; font-weight: 500; line-height: 1.4;">
+                        A 6-digit OTP has been sent to your registered email address.
+                        <span id="mfaMaskedEmail" class="hidden"></span>
+                        <span id="mfaOtpTimer" class="hidden">05:00</span>
                     </div>
                     
                     <form id="mfaOtpForm" onsubmit="handleMfaOtpSubmit(event)">

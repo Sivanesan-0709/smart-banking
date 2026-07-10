@@ -77,11 +77,11 @@ def send_otp_email(recipient_email, otp, amount, receiver):
     smtp_from = os.environ.get('SMTP_FROM_EMAIL', smtp_username)
     smtp_use_tls = os.environ.get('SMTP_USE_TLS', 'True').lower() in ('true', '1', 'yes')
     
+    is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+    
     if not smtp_host or not smtp_username or not smtp_password:
-        is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
-        is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
         if is_test or is_dev:
-            print(f"[DEVELOPMENT ONLY] Mock email sent to {recipient_email}. OTP is: {otp}")
             return True
         else:
             raise RuntimeError("Mailing failed: SMTP environment variables are missing.")
@@ -112,11 +112,7 @@ def send_otp_email(recipient_email, otp, amount, receiver):
         server.quit()
         return True
     except Exception as e:
-        traceback.print_exc()
-        is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
-        is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
         if is_test or is_dev:
-            print(f"[DEVELOPMENT ONLY] SMTP failed, falling back to mock. OTP is: {otp}")
             return True
         raise e
 
@@ -1320,7 +1316,16 @@ def transfer_initiate():
         if not sender_email:
             sender_email = f"{sender}@smartbanking.com"
             
-        send_otp_email(sender_email, otp, amount, receiver)
+        try:
+            send_otp_email(sender_email, otp, amount, receiver)
+        except Exception as mail_err:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = ?", (token,))
+            cursor.execute("DELETE FROM pending_transactions WHERE token = ?", (token,))
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "error", "message": "Failed to send verification email. Please verify SMTP settings."}), 500
         
         parts = sender_email.split('@')
         name = parts[0]
@@ -1522,8 +1527,11 @@ def otp_resend():
         conn.commit()
         conn.close()
         
-        send_otp_email(email, otp, pending_tx['amount'], pending_tx['receiver'])
-        
+        try:
+            send_otp_email(email, otp, pending_tx['amount'], pending_tx['receiver'])
+        except Exception as mail_err:
+            return jsonify({"status": "error", "message": "Failed to send verification email. Please verify SMTP settings."}), 500
+            
         return jsonify({
             "status": "success",
             "message": "A new verification code has been sent to your email.",
