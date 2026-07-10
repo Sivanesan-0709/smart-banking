@@ -11,16 +11,117 @@ import json
 import traceback
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import datetime
+from pathlib import Path
 import base64
 import cv2
 import random
+import sys
+import secrets
+import hashlib
+import hmac
+import smtplib
+from email.message import EmailMessage
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# Load local .env file manually if present
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+if os.path.exists(env_path):
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if '=' in line and not line.strip().startswith('#'):
+                k, v = line.strip().split('=', 1)
+                os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=None)
-app.secret_key = 'smart_banking_secure_session_key_2026'
-DB_PATH = 'BankNH.db'
-MODEL_PATH = 'banking_app_rf.pkl'
-METRICS_PATH = 'model_metrics.json'
+
+is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+
+secret_key = os.environ.get('SECRET_KEY')
+if not secret_key:
+    if is_test or is_dev:
+        secret_key = 'smart_banking_secure_session_key_2026'
+    else:
+        raise RuntimeError("Production Startup Failure: SECRET_KEY environment variable is missing.")
+app.secret_key = secret_key
+
+otp_pepper = os.environ.get('OTP_PEPPER')
+if not otp_pepper:
+    if is_test or is_dev:
+        otp_pepper = 'smart_banking_secure_otp_pepper_2026'
+    else:
+        raise RuntimeError("Production Startup Failure: OTP_PEPPER environment variable is missing.")
+
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER') is not None
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = str(BASE_DIR / 'BankNH.db')
+
+# --- OTP Security & Email Delivery Helpers ---
+def hash_otp(otp):
+    pepper = os.environ.get('OTP_PEPPER', 'smart_banking_secure_otp_pepper_2026')
+    return hmac.new(pepper.encode('utf-8'), otp.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def verify_otp_hmac(input_otp, stored_hash):
+    computed_hash = hash_otp(input_otp)
+    return hmac.compare_digest(stored_hash, computed_hash)
+
+def send_otp_email(recipient_email, otp, amount, receiver):
+    smtp_host = os.environ.get('SMTP_HOST')
+    smtp_port = os.environ.get('SMTP_PORT')
+    smtp_username = os.environ.get('SMTP_USERNAME')
+    smtp_password = os.environ.get('SMTP_PASSWORD')
+    smtp_from = os.environ.get('SMTP_FROM_EMAIL', smtp_username)
+    smtp_use_tls = os.environ.get('SMTP_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+    
+    if not smtp_host or not smtp_username or not smtp_password:
+        is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+        is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+        if is_test or is_dev:
+            print(f"[DEVELOPMENT ONLY] Mock email sent to {recipient_email}. OTP is: {otp}")
+            return True
+        else:
+            raise RuntimeError("Mailing failed: SMTP environment variables are missing.")
+            
+    msg = EmailMessage()
+    msg['Subject'] = 'Smart Banking Security Verification Code'
+    msg['From'] = smtp_from
+    msg['To'] = recipient_email
+    
+    body = f"""<h2>Smart Banking Security Verification</h2>
+<p>You have initiated a high-risk transaction of <strong>INR {amount:,.2f}</strong> to recipient <strong>{receiver}</strong>.</p>
+<p>Your 6-digit verification code is:</p>
+<p style="font-size: 1.5rem; font-weight: bold; letter-spacing: 2px; color: #9b5de5;">{otp}</p>
+<p>This code is valid for exactly <strong>5 minutes</strong>. Do NOT share this code with anyone, including bank representatives.</p>
+<p>If you did not initiate this transaction, please log in to your account and change your password immediately.</p>
+"""
+    msg.set_content(body, subtype='html')
+    
+    try:
+        if smtp_use_tls:
+            server = smtplib.SMTP(smtp_host, int(smtp_port))
+            server.starttls()
+        else:
+            server = smtplib.SMTP_SSL(smtp_host, int(smtp_port))
+        
+        server.login(smtp_username, smtp_password)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        traceback.print_exc()
+        is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+        is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+        if is_test or is_dev:
+            print(f"[DEVELOPMENT ONLY] SMTP failed, falling back to mock. OTP is: {otp}")
+            return True
+        raise e
+
+MODEL_PATH = str(BASE_DIR / 'banking_app_rf.pkl')
+METRICS_PATH = str(BASE_DIR / 'model_metrics.json')
 
 # Global ML models
 model = None
@@ -77,13 +178,63 @@ def load_face_models():
         print("Face ONNX models are missing and could not be downloaded.")
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
+
+def is_login_rate_limited(username):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # Bounded cleanup of expired attempts (> 5 minutes ago)
+    cursor.execute("DELETE FROM login_attempts WHERE attempted_at < datetime('now', '-5 minutes')")
+    conn.commit()
+    
+    # Check attempts in last 5 minutes
+    cursor.execute("SELECT COUNT(*) FROM login_attempts WHERE username = ? AND attempted_at >= datetime('now', '-5 minutes')", (username,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count >= 5
+
+def record_login_attempt(username):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO login_attempts (username) VALUES (?)", (username,))
+    conn.commit()
+    conn.close()
+
+def clear_login_attempts(username):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM login_attempts WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # Create cash_out_channels table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS cash_out_channels (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        status TEXT DEFAULT 'ACTIVE'
+    )
+    ''')
+    # Seed default cash out channels
+    cursor.execute("INSERT OR IGNORE INTO cash_out_channels (id, name, status) VALUES ('ATM_01', 'Main Branch ATM', 'ACTIVE')")
+    cursor.execute("INSERT OR IGNORE INTO cash_out_channels (id, name, status) VALUES ('AGENT_ALPHA', 'Mobile Agent Alpha', 'ACTIVE')")
+    cursor.execute("INSERT OR IGNORE INTO cash_out_channels (id, name, status) VALUES ('MERCHANT_WEST', 'Westside Merchant Partner', 'ACTIVE')")
+    
+    # Create login_attempts table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS login_attempts (
+        username TEXT NOT NULL,
+        attempted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
     # Create NEWBANK if not exists
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS NEWBANK (
@@ -100,6 +251,53 @@ def init_db():
         BAL REAL DEFAULT 50000.0
     )
     ''')
+
+    # Create pending_transactions if not exists
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS pending_transactions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        receiver TEXT NOT NULL,
+        amount REAL NOT NULL,
+        ttype TEXT NOT NULL,
+        risk_score INTEGER NOT NULL,
+        risk_level TEXT NOT NULL,
+        reasons TEXT NOT NULL,
+        is_fraud_predicted INTEGER NOT NULL,
+        otp_verified INTEGER DEFAULT 0,
+        face_verified INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        status TEXT DEFAULT 'PENDING',
+        decision_trace TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+    )
+    ''')
+
+    # Create transaction_otp_challenges if not exists
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS transaction_otp_challenges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        transaction_token TEXT NOT NULL,
+        otp_hash TEXT NOT NULL,
+        expires_at DATETIME NOT NULL,
+        attempts INTEGER DEFAULT 0,
+        max_attempts INTEGER DEFAULT 5,
+        resend_count INTEGER DEFAULT 0,
+        last_sent_at DATETIME,
+        verified INTEGER DEFAULT 0,
+        verified_at DATETIME,
+        consumed INTEGER DEFAULT 0,
+        consumed_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(transaction_token) REFERENCES pending_transactions(token)
+    )
+    ''')
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_otp_token ON transaction_otp_challenges(transaction_token)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_transactions(token)")
+
     
     # Create NEWT if not exists
     cursor.execute('''
@@ -182,6 +380,15 @@ def init_db():
     if 'IS_FRAUD_PREDICTED' not in columns:
         cursor.execute("ALTER TABLE NEWT ADD COLUMN IS_FRAUD_PREDICTED INTEGER DEFAULT 0")
         
+    # Index migrations (run after all tables are created)
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_newbank_username ON NEWBANK(USERNAME)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_timestamp ON NEWT(TIMESTAMP)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_sender ON NEWT(SENDER)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_receiver ON NEWT(RECEIVER)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_status ON NEWT(STATUS)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_face_attempts_user ON face_verification_attempts(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username)")
+    
     conn.commit()
     conn.close()
 
@@ -203,10 +410,10 @@ def decode_base64_image(base64_str):
         nparr = np.frombuffer(img_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
-            img = np.zeros((240, 320, 3), dtype=np.uint8)
+            raise ValueError("Decoded image is empty or invalid format.")
         return img
-    except Exception:
-        return np.zeros((240, 320, 3), dtype=np.uint8)
+    except Exception as e:
+        raise ValueError(f"Failed to decode base64 image: {str(e)}")
 
 def validate_face_quality(img):
     if face_detector is None:
@@ -251,10 +458,18 @@ def validate_face_quality(img):
 
 def extract_face_embedding(img, face):
     if face_recognizer is None:
-        return [0.0] * 128
+        raise ValueError("Face recognition model is not loaded on the server.")
     aligned_face = face_recognizer.alignCrop(img, face)
     embedding = face_recognizer.feature(aligned_face)
-    return embedding[0].tolist()
+    if embedding is None or len(embedding) == 0:
+        raise ValueError("Failed to extract face features from image.")
+    emb_list = embedding[0].tolist()
+    if len(emb_list) != 128:
+        raise ValueError(f"Invalid face embedding dimension: {len(emb_list)} (expected 128).")
+    # Zero vector norm protection
+    if np.linalg.norm(emb_list) == 0:
+        raise ValueError("Extracted face embedding is a zero vector.")
+    return emb_list
 
 def check_liveness_challenge(face, challenge):
     landmarks = face[4:14]
@@ -284,7 +499,16 @@ def check_liveness_challenge(face, challenge):
 def calculate_similarity(emb1, emb2):
     a = np.array(emb1)
     b = np.array(emb2)
-    cosine_sim = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    
+    if norm_a == 0 or norm_b == 0:
+        return False, 0.0, 0.363
+        
+    cosine_sim = np.dot(a, b) / (norm_a * norm_b)
+    if np.isnan(cosine_sim) or np.isinf(cosine_sim):
+        cosine_sim = 0.0
+        
     threshold = 0.363 # OpenCV Zoo SFace cosine similarity threshold
     is_match = bool(cosine_sim >= threshold)
     return is_match, float(cosine_sim), threshold
@@ -329,10 +553,11 @@ def register():
             conn.close()
             return jsonify({"status": "error", "message": "Username already exists."}), 400
 
+        hashed_pw = generate_password_hash(password)
         cursor.execute('''
         INSERT INTO NEWBANK (USERNAME, FIRSTNAME, LASTNAME, EMAIL, PASSWORD, CONFIRM, PHONE, SEX, ADDRESS, BAL)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (username, firstname, lastname, email, password, confirm, phone, sex, address, initial_bal))
+        ''', (username, firstname, lastname, email, hashed_pw, "", phone, sex, address, initial_bal))
         
         conn.commit()
         conn.close()
@@ -347,24 +572,48 @@ def login():
         data = request.get_json()
         username = data.get('username', '').strip()
         password = data.get('password', '')
-
+        
         if not username or not password:
             return jsonify({"status": "error", "message": "Please enter both username and password."}), 400
-
+            
+        if is_login_rate_limited(username):
+            return jsonify({"status": "error", "message": "Too many failed login attempts. Please wait 5 minutes."}), 429
+            
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = ? AND PASSWORD = ?", (username, password))
+        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = ?", (username,))
         user = cursor.fetchone()
-        conn.close()
-
+        
         if user:
-            session['username'] = user['USERNAME']
-            session['user_id'] = user['ID']
-            session['is_admin'] = (user['USERNAME'].lower() == 'admin' or user['USERNAME'].lower() == 'auditor')
-            return jsonify({
-                "status": "success",
-                "message": "Login successful!",
-                "user": {
+            stored_pw = user['PASSWORD']
+            pw_ok = False
+            legacy = False
+            
+            try:
+                if check_password_hash(stored_pw, password):
+                    pw_ok = True
+                elif stored_pw == password:
+                    pw_ok = True
+                    legacy = True
+            except Exception:
+                if stored_pw == password:
+                    pw_ok = True
+                    legacy = True
+                    
+            if pw_ok:
+                if legacy:
+                    hashed = generate_password_hash(password)
+                    cursor.execute("UPDATE NEWBANK SET PASSWORD = ? WHERE ID = ?", (hashed, user['ID']))
+                    conn.commit()
+                
+                clear_login_attempts(username)
+                
+                session.clear()
+                session['username'] = user['USERNAME']
+                session['user_id'] = user['ID']
+                session['is_admin'] = (user['USERNAME'].lower() == 'admin' or user['USERNAME'].lower() == 'auditor')
+                
+                res_user = {
                     "username": user['USERNAME'],
                     "firstname": user['FIRSTNAME'],
                     "lastname": user['LASTNAME'],
@@ -375,10 +624,18 @@ def login():
                     "balance": user['BAL'],
                     "is_admin": session['is_admin']
                 }
-            })
-        else:
-            return jsonify({"status": "error", "message": "Invalid username or password."}), 401
+                conn.close()
+                return jsonify({
+                    "status": "success",
+                    "message": "Login successful!",
+                    "user": res_user
+                })
+        
+        record_login_attempt(username)
+        conn.close()
+        return jsonify({"status": "error", "message": "Invalid username or password."}), 401
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/logout', methods=['POST'])
@@ -554,8 +811,16 @@ def biometric_enroll():
         conn.close()
         
         return jsonify({"status": "success", "message": "Face profile enrolled successfully! Biometric protection active."})
+    except ValueError as ve:
+        if 'conn' in locals() and conn:
+            try: conn.close()
+            except: pass
+        return jsonify({"status": "error", "message": str(ve)}), 400
     except Exception as e:
         traceback.print_exc()
+        if 'conn' in locals() and conn:
+            try: conn.close()
+            except: pass
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/biometric/delete', methods=['POST'])
@@ -680,21 +945,27 @@ def biometric_verify_check():
         
         if is_match:
             # Mark biometrics verified in the pending transfer transaction if exists
-            if 'pending_tx' in session:
-                pending = session['pending_tx']
-                pending['face_verified'] = True
-                session['pending_tx'] = pending
-                session.modified = True
+            token = session.get('mfa_pending_token')
+            if token:
+                cursor.execute("UPDATE pending_transactions SET face_verified = 1 WHERE token = ?", (token,))
                 
             cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = ? AND verification_result = 'SUCCESS'", (user_id,))
             attempts_row = cursor.fetchone()
             
+            # Auto-finalize transaction if OTP was already verified
+            token = session.get('mfa_pending_token')
+            otp_already_verified = False
+            if token:
+                cursor.execute("SELECT otp_verified FROM pending_transactions WHERE token = ?", (token,))
+                ptx = cursor.fetchone()
+                if ptx and ptx['otp_verified']:
+                    otp_already_verified = True
+            
             conn.commit()
             conn.close()
             
-            # Auto-finalize transaction if OTP was already verified
-            if 'pending_tx' in session and session['pending_tx'].get('otp_verified', False):
-                return finalize_pending_transaction()
+            if otp_already_verified:
+                return finalize_pending_transaction(token)
                 
             return jsonify({
                 "status": "success",
@@ -718,8 +989,16 @@ def biometric_verify_check():
                 "threshold": threshold
             }), 400
             
+    except ValueError as ve:
+        if 'conn' in locals() and conn:
+            try: conn.close()
+            except: pass
+        return jsonify({"status": "error", "message": str(ve)}), 400
     except Exception as e:
         traceback.print_exc()
+        if 'conn' in locals() and conn:
+            try: conn.close()
+            except: pass
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -856,53 +1135,70 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
 def transfer_initiate():
     if 'username' not in session:
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
-    
+        
     try:
         data = request.get_json()
-        sender = session['username']
-        sender_id = session['user_id']
+        if not data:
+            return jsonify({"status": "error", "message": "Missing request payload."}), 400
+            
         receiver = data.get('receiver', '').strip()
         amount_str = data.get('amount', '0')
-        ttype = data.get('type', 'TRANSFER')
-
-        if not receiver or not amount_str:
-            return jsonify({"status": "error", "message": "Receiver and amount are required."}), 400
-
+        ttype = data.get('type', 'TRANSFER').strip().upper()
+        
         try:
             amount = float(amount_str)
-            if amount <= 0:
-                raise ValueError()
         except ValueError:
-            return jsonify({"status": "error", "message": "Invalid amount. Must be a positive number."}), 400
-
-        if sender == receiver:
-            return jsonify({"status": "error", "message": "You cannot transfer money to yourself."}), 400
-
+            return jsonify({"status": "error", "message": "Invalid transfer amount format."}), 400
+            
+        if amount <= 0:
+            return jsonify({"status": "error", "message": "Transfer amount must be greater than zero."}), 400
+            
+        sender = session['username']
+        sender_id = session.get('user_id')
+        
         conn = get_db_connection()
         cursor = conn.cursor()
-
-        # Check sender details
-        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (sender,))
-        sender_row = cursor.fetchone()
-        if not sender_row:
+        
+        # Check transaction type
+        if ttype not in ['TRANSFER', 'CASH_OUT']:
             conn.close()
-            return jsonify({"status": "error", "message": "Sender account not found."}), 404
-        sender_balance = sender_row['BAL'] if sender_row['BAL'] is not None else 0.0
-
+            return jsonify({"status": "error", "message": "Invalid transaction type."}), 400
+            
+        # Check receiver exists based on transaction type
+        if ttype == 'TRANSFER':
+            cursor.execute("SELECT ID, BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+            receiver_row = cursor.fetchone()
+            if not receiver_row:
+                conn.close()
+                return jsonify({"status": "error", "message": "Receiver username not found."}), 404
+            if receiver == sender:
+                conn.close()
+                return jsonify({"status": "error", "message": "Cannot transfer to yourself."}), 400
+        else: # CASH_OUT
+            cursor.execute("SELECT * FROM cash_out_channels WHERE id = ? AND status = 'ACTIVE'", (receiver,))
+            channel_row = cursor.fetchone()
+            if not channel_row:
+                conn.close()
+                return jsonify({"status": "error", "message": "Invalid or inactive cash out channel."}), 400
+            if receiver == sender:
+                conn.close()
+                return jsonify({"status": "error", "message": "Cannot cash out to yourself."}), 400
+            receiver_row = {'BAL': 0.0}
+            
+        # Get sender details
+        cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE USERNAME = ?", (sender,))
+        sender_row = cursor.fetchone()
+        sender_balance = sender_row['BAL']
+        sender_email = sender_row['EMAIL']
+        
         if sender_balance < amount:
             conn.close()
             return jsonify({"status": "error", "message": "Insufficient balance."}), 400
-
-        # Check receiver details
-        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
-        receiver_row = cursor.fetchone()
-        
-        if not receiver_row:
-            conn.close()
-            return jsonify({"status": "error", "message": "Receiver username not found."}), 404
-
+            
         # Run Hybrid Risk Engine
-        risk_score, risk_level, reasons, is_fraud_predicted, breakdown, ml_probability = compute_hybrid_risk(sender_id, sender, receiver, amount, ttype)
+        risk_score, risk_level, reasons, is_fraud_predicted, breakdown, ml_probability = compute_hybrid_risk(
+            sender_id, sender, receiver, amount, ttype
+        )
         
         # Prepare decision trace
         feature_importances = {}
@@ -917,7 +1213,7 @@ def transfer_initiate():
                 feature_importances = dict(zip(feature_names, importances))
             except:
                 pass
-        
+                
         decision_trace = {
             "risk_score": risk_score,
             "risk_level": risk_level,
@@ -928,104 +1224,128 @@ def transfer_initiate():
             "auth_required": [],
             "auth_completed": []
         }
+        
         if risk_level == 'MEDIUM':
             decision_trace['auth_required'] = ['otp']
         elif risk_level == 'HIGH':
             decision_trace['auth_required'] = ['otp', 'face']
         elif risk_level == 'CRITICAL':
             decision_trace['auth_required'] = ['admin_review']
-        
+            
         # Check if user has biometric face profile enrolled
         cursor.execute("SELECT id FROM face_enrollments WHERE user_id = ?", (sender_id,))
         has_face_enrolled = (cursor.fetchone() is not None)
-        conn.close()
         
-        # Generate random 6-digit OTP
-        otp = f"{random.randint(100000, 999999)}"
-        
-        # Save details in session
-        session['pending_tx'] = {
-            'sender': sender,
-            'sender_id': sender_id,
-            'receiver': receiver,
-            'amount': amount,
-            'type': ttype,
-            'otp': otp,
-            'risk_score': risk_score,
-            'risk_level': risk_level,
-            'reasons': reasons,
-            'is_fraud_predicted': is_fraud_predicted,
-            'otp_verified': False,
-            'face_verified': False,
-            'decision_trace': decision_trace
-        }
-        
-        print(f"[{risk_level} RISK] OTP for transaction {sender} -> {receiver} (INR {amount}) is: [{otp}]")
+        # Enforce enrollment requirement for HIGH risk
+        if risk_level == 'HIGH' and not has_face_enrolled:
+            conn.close()
+            return jsonify({
+                "status": "error",
+                "message": "Biometric face enrollment is required to verify high-risk transactions. Please enroll your face first."
+            }), 400
+            
+        # Generate token
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         
         # LOW RISK: Auto approve
         if risk_level == 'LOW':
-            session['pending_tx']['otp_verified'] = True
-            session['pending_tx']['face_verified'] = True
-            return finalize_pending_transaction()
-            
-        # CRITICAL RISK: Block immediately
-        if risk_level == 'CRITICAL':
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            # Log blocked directly
             cursor.execute('''
-            INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BLOCKED', ?, ?)
-            ''', (sender, receiver, ttype, amount, sender_balance, sender_balance, receiver_row['BAL'], receiver_row['BAL'], is_fraud_predicted, json.dumps(decision_trace)))
+            INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, otp_verified, face_verified, expires_at, decision_trace)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+            ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
+            conn.commit()
             
-            # Broadcast to admin room
+            res = finalize_pending_transaction(token)
+            conn.close()
+            return res
+            
+        # CRITICAL RISK: Queue for Admin Review
+        if risk_level == 'CRITICAL':
+            cursor.execute('''
+            INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, status, decision_trace)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_REVIEW', ?)
+            ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
+            
+            cursor.execute('''
+            INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+            VALUES (?, 'TRANSACTION_HELD_FOR_REVIEW', 'HIGH', ?)
+            ''', (sender_id, f"Transaction {amount} to {receiver} held for admin review due to CRITICAL risk score {risk_score}."))
+            
+            tx_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            
             tx_event = {
+                'id': tx_id,
                 'sender': sender[0] + '***' + sender[-1] if len(sender) > 1 else sender,
                 'receiver': receiver[0] + '***' + receiver[-1] if len(receiver) > 1 else receiver,
                 'ttype': ttype,
                 'amount': amount,
-                'status': 'BLOCKED',
+                'status': 'PENDING_REVIEW',
                 'risk_score': risk_score,
                 'risk_level': risk_level,
                 'reasons': reasons,
                 'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             socketio.emit('new_transaction', tx_event, to='admin_room')
-            conn.commit()
-            conn.close()
             
-            session.pop('pending_tx', None)
             return jsonify({
-                "status": "blocked",
-                "message": "Security Alert: This transaction has been BLOCKED. Transaction exhibits CRITICAL threat indicators (risk score > 90). Administrator review required.",
-                "score": risk_score,
-                "level": risk_level,
-                "reasons": reasons
-            }), 400
-
-        # MEDIUM RISK: Requires OTP only
-        if risk_level == 'MEDIUM':
-            return jsonify({
-                "status": "verification_required",
-                "required": ["otp"],
-                "otp": otp,
+                "status": "pending_review",
+                "message": "Security Alert: This transaction exhibits CRITICAL risk indicators. It has been queued for Administrator Review. No funds will move until approved.",
+                "transaction_token": token,
                 "score": risk_score,
                 "level": risk_level,
                 "reasons": reasons
             })
-
-        # HIGH RISK: Requires OTP + Face verification
+            
+        otp = f"{secrets.randbelow(1000000):06d}"
+        otp_hashed = hash_otp(otp)
+        
+        # Save pending transaction to DB
+        cursor.execute('''
+        INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, decision_trace)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
+        
+        # Save OTP challenge
+        cursor.execute('''
+        INSERT INTO transaction_otp_challenges (user_id, transaction_token, otp_hash, expires_at, last_sent_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ''', (sender_id, token, otp_hashed, expires_at))
+        
+        conn.commit()
+        conn.close()
+        
+        if not sender_email:
+            sender_email = f"{sender}@smartbanking.com"
+            
+        send_otp_email(sender_email, otp, amount, receiver)
+        
+        parts = sender_email.split('@')
+        name = parts[0]
+        domain = parts[1]
+        if len(name) > 2:
+            masked_name = name[0] + '*' * (len(name) - 2) + name[-1]
+        else:
+            masked_name = name[0] + '*'
+        masked_email = f"{masked_name}@{domain}"
+        
+        required_auths = ["otp"]
         if risk_level == 'HIGH':
-            return jsonify({
-                "status": "verification_required",
-                "required": ["otp", "face"],
-                "otp": otp,
-                "face_enrolled": has_face_enrolled,
-                "score": risk_score,
-                "level": risk_level,
-                "reasons": reasons
-            })
-
+            required_auths.append("face")
+            
+        return jsonify({
+            "status": "verification_required",
+            "required": required_auths,
+            "transaction_token": token,
+            "masked_email": masked_email,
+            "expires_in": 300,
+            "score": risk_score,
+            "level": risk_level,
+            "reasons": reasons
+        })
+        
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -1035,88 +1355,271 @@ def transfer_verify():
     if 'username' not in session:
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
         
-    pending = session.get('pending_tx')
-    if not pending:
-        return jsonify({"status": "error", "message": "No pending transaction found."}), 400
-        
-    data = request.get_json()
-    otp = data.get('otp', '').strip()
-    
-    if not otp:
-        return jsonify({"status": "error", "message": "OTP verification code is required."}), 400
-        
-    if otp != pending['otp']:
-        return jsonify({"status": "error", "message": "Invalid OTP code. Please try again."}), 400
-        
-    # OTP verified!
-    pending['otp_verified'] = True
-    session['pending_tx'] = pending
-    session.modified = True
-    
-    # If risk is medium, finalize transaction
-    if pending['risk_level'] == 'MEDIUM':
-        return finalize_pending_transaction()
-        
-    # If risk is high, return that OTP is OK but face check is still required
-    if pending['risk_level'] == 'HIGH':
-        if pending['face_verified']:
-            return finalize_pending_transaction()
-        else:
-            return jsonify({
-                "status": "otp_ok_need_face",
-                "message": "OTP verified successfully. Please proceed to the face liveness check."
-            })
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "Missing request payload."}), 400
             
-    return jsonify({"status": "error", "message": "State machine conflict."}), 500
-
-def finalize_pending_transaction():
-    pending = session.get('pending_tx')
-    if not pending:
-        return jsonify({"status": "error", "message": "No pending transaction details available."}), 400
+        token = data.get('transaction_token', '').strip()
+        otp = data.get('otp', '').strip()
         
-    sender = pending['sender']
-    receiver = pending['receiver']
-    amount = pending['amount']
-    ttype = pending['type']
-    is_fraud_predicted = pending['is_fraud_predicted']
-    
-    # Clear from session
-    session.pop('pending_tx', None)
-    
+        if not token or not otp:
+            return jsonify({"status": "error", "message": "Transaction token and OTP code are required."}), 400
+            
+        if not otp.isdigit() or len(otp) != 6:
+            return jsonify({"status": "error", "message": "OTP must be exactly 6 numeric digits."}), 400
+            
+        user_id = session['user_id']
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT * FROM transaction_otp_challenges 
+        WHERE transaction_token = ? AND user_id = ?
+        ''', (token, user_id))
+        challenge = cursor.fetchone()
+        
+        if not challenge:
+            conn.close()
+            return jsonify({"status": "error", "message": "Verification challenge not found."}), 404
+            
+        utc_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        if challenge['expires_at'] < utc_now or challenge['consumed'] or challenge['verified']:
+            conn.close()
+            return jsonify({"status": "error", "message": "Verification challenge has expired or already been consumed."}), 400
+            
+        if challenge['attempts'] >= challenge['max_attempts']:
+            conn.close()
+            return jsonify({"status": "error", "message": "Maximum verification attempts exceeded. Please start a new transaction."}), 400
+            
+        is_valid = verify_otp_hmac(otp, challenge['otp_hash'])
+        
+        if not is_valid:
+            new_attempts = challenge['attempts'] + 1
+            cursor.execute('''
+            UPDATE transaction_otp_challenges 
+            SET attempts = ? 
+            WHERE id = ?
+            ''', (new_attempts, challenge['id']))
+            conn.commit()
+            
+            remaining = challenge['max_attempts'] - new_attempts
+            conn.close()
+            if remaining <= 0:
+                return jsonify({"status": "error", "message": "Maximum verification attempts exceeded. Locked."}), 400
+            else:
+                return jsonify({"status": "error", "message": f"Incorrect code. {remaining} attempts remaining."}), 400
+                
+        cursor.execute('''
+        UPDATE transaction_otp_challenges 
+        SET verified = 1, verified_at = datetime('now') 
+        WHERE id = ?
+        ''', (challenge['id'],))
+        
+        cursor.execute('''
+        UPDATE pending_transactions 
+        SET otp_verified = 1 
+        WHERE token = ?
+        ''', (token,))
+        
+        cursor.execute("SELECT risk_level FROM pending_transactions WHERE token = ?", (token,))
+        pending_row = cursor.fetchone()
+        
+        conn.commit()
+        conn.close()
+        
+        if pending_row['risk_level'] == 'MEDIUM':
+            return finalize_pending_transaction(token)
+            
+        session['mfa_pending_token'] = token
+        return jsonify({
+            "status": "otp_ok_need_face",
+            "message": "OTP verified successfully. Please proceed to the face liveness check."
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/otp/resend', methods=['POST'])
+def otp_resend():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "Missing request payload."}), 400
+            
+        token = data.get('transaction_token', '').strip()
+        if not token:
+            return jsonify({"status": "error", "message": "Transaction token is required."}), 400
+            
+        user_id = session['user_id']
+        username = session['username']
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT * FROM transaction_otp_challenges 
+        WHERE transaction_token = ? AND user_id = ?
+        ''', (token, user_id))
+        challenge = cursor.fetchone()
+        
+        if not challenge:
+            conn.close()
+            return jsonify({"status": "error", "message": "Verification challenge not found."}), 404
+            
+        if challenge['consumed'] or challenge['verified']:
+            conn.close()
+            return jsonify({"status": "error", "message": "Challenge is already verified or consumed."}), 400
+            
+        if challenge['resend_count'] >= 3:
+            conn.close()
+            return jsonify({"status": "error", "message": "Maximum OTP resend limit (3) exceeded. Please restart the transaction."}), 400
+            
+        last_sent_str = challenge['last_sent_at']
+        if last_sent_str:
+            try:
+                cursor.execute('''
+                SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS diff
+                ''', (last_sent_str,))
+                diff_row = cursor.fetchone()
+                diff = diff_row['diff'] if diff_row else 999
+                
+                if diff is not None and diff < 60:
+                    conn.close()
+                    return jsonify({"status": "error", "message": f"Please wait {60 - int(diff)} seconds before resending."}), 400
+            except Exception as ex:
+                pass
+                
+        otp = f"{secrets.randbelow(1000000):06d}"
+        otp_hashed = hash_otp(otp)
+        expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute('''
+        UPDATE transaction_otp_challenges 
+        SET otp_hash = ?, expires_at = ?, last_sent_at = datetime('now'), resend_count = resend_count + 1, attempts = 0
+        WHERE id = ?
+        ''', (otp_hashed, expires_at, challenge['id']))
+        
+        cursor.execute('''
+        UPDATE pending_transactions 
+        SET expires_at = ? 
+        WHERE token = ?
+        ''', (expires_at, token))
+        
+        cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = ?", (user_id,))
+        email = cursor.fetchone()['EMAIL']
+        if not email:
+            email = f"{username}@smartbanking.com"
+            
+        cursor.execute("SELECT amount, receiver FROM pending_transactions WHERE token = ?", (token,))
+        pending_tx = cursor.fetchone()
+        
+        conn.commit()
+        conn.close()
+        
+        send_otp_email(email, otp, pending_tx['amount'], pending_tx['receiver'])
+        
+        return jsonify({
+            "status": "success",
+            "message": "A new verification code has been sent to your email.",
+            "expires_in": 300
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+def finalize_pending_transaction(token):
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        cursor.execute("BEGIN TRANSACTION")
         
-        # Get sender details
-        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (sender,))
-        sender_bal = cursor.fetchone()['BAL']
+        cursor.execute("SELECT * FROM pending_transactions WHERE token = ?", (token,))
+        pending = cursor.fetchone()
         
-        # Get receiver details
-        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
-        receiver_bal = cursor.fetchone()['BAL']
+        if not pending:
+            cursor.execute("ROLLBACK")
+            conn.close()
+            return jsonify({"status": "error", "message": "Pending transaction details not found."}), 404
+            
+        if pending['status'] != 'PENDING':
+            cursor.execute("ROLLBACK")
+            conn.close()
+            return jsonify({"status": "error", "message": "Transaction has already been processed or expired."}), 400
+            
+        utc_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        if pending['expires_at'] < utc_now:
+            cursor.execute("UPDATE pending_transactions SET status = 'EXPIRED' WHERE token = ?", (token,))
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "error", "message": "Transaction verification window has expired."}), 400
+            
+        # Verification checks based on risk level
+        if not pending['otp_verified']:
+            cursor.execute("ROLLBACK")
+            conn.close()
+            return jsonify({"status": "error", "message": "OTP verification required."}), 400
+            
+        if pending['risk_level'] == 'HIGH' and not pending['face_verified']:
+            cursor.execute("ROLLBACK")
+            conn.close()
+            return jsonify({"status": "error", "message": "Biometric face verification required."}), 400
+            
+        sender_id = pending['user_id']
+        receiver = pending['receiver']
+        amount = pending['amount']
+        ttype = pending['ttype']
+        is_fraud_predicted = pending['is_fraud_predicted']
         
+        cursor.execute("SELECT USERNAME, BAL FROM NEWBANK WHERE ID = ?", (sender_id,))
+        sender_row = cursor.fetchone()
+        sender = sender_row['USERNAME']
+        sender_bal = sender_row['BAL']
+        
+        if ttype == 'TRANSFER':
+            cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+            receiver_row = cursor.fetchone()
+            receiver_bal = receiver_row['BAL']
+            receiver_new_bal = receiver_bal + amount
+        else: # CASH_OUT
+            receiver_bal = 0.0
+            receiver_new_bal = 0.0
+            
         if sender_bal < amount:
+            cursor.execute("UPDATE pending_transactions SET status = 'FAILED' WHERE token = ?", (token,))
+            cursor.execute("ROLLBACK")
             conn.close()
             return jsonify({"status": "error", "message": "Insufficient balance at finalization."}), 400
             
         sender_new_bal = sender_bal - amount
-        receiver_new_bal = receiver_bal + amount
         
-        # Process transfer updates
-        cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE USERNAME = ?", (sender_new_bal, sender))
-        cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE USERNAME = ?", (receiver_new_bal, receiver))
+        cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE ID = ?", (sender_new_bal, sender_id))
+        if ttype == 'TRANSFER':
+            cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE USERNAME = ?", (receiver_new_bal, receiver))
+            
+        cursor.execute("UPDATE pending_transactions SET status = 'COMPLETED' WHERE token = ?", (token,))
         
-        # Prepare decision trace auth completion
-        decision_trace = pending.get('decision_trace', {})
+        cursor.execute('''
+        UPDATE transaction_otp_challenges 
+        SET consumed = 1, consumed_at = datetime('now') 
+        WHERE transaction_token = ?
+        ''', (token,))
+        
+        decision_trace = json.loads(pending['decision_trace'])
         auth_completed = []
-        if pending.get('otp_verified'):
+        if pending['otp_verified']:
             auth_completed.append('otp')
-        if pending.get('face_verified'):
+        if pending['face_verified']:
             auth_completed.append('face')
         decision_trace['auth_completed'] = auth_completed
         
-        # Log APPROVED transaction
         cursor.execute('''
         INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?)
@@ -1124,7 +1627,6 @@ def finalize_pending_transaction():
         
         tx_id = cursor.lastrowid
         
-        # Broadcast to admin room
         tx_event = {
             'id': tx_id,
             'sender': sender[0] + '***' + sender[-1] if len(sender) > 1 else sender,
@@ -1132,9 +1634,9 @@ def finalize_pending_transaction():
             'ttype': ttype,
             'amount': amount,
             'status': 'APPROVED',
-            'risk_score': pending.get('risk_score', 10),
-            'risk_level': pending.get('risk_level', 'LOW'),
-            'reasons': pending.get('reasons', []),
+            'risk_score': pending['risk_score'],
+            'risk_level': pending['risk_level'],
+            'reasons': json.loads(pending['reasons']),
             'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         socketio.emit('new_transaction', tx_event, to='admin_room')
@@ -1142,15 +1644,21 @@ def finalize_pending_transaction():
         conn.commit()
         conn.close()
         
+        session.pop('mfa_pending_token', None)
+        
         return jsonify({
             "status": "success",
             "message": "Transfer completed successfully.",
             "new_balance": sender_new_bal
         })
+        
     except Exception as e:
         traceback.print_exc()
         if conn:
-            conn.rollback()
+            try:
+                cursor.execute("ROLLBACK")
+            except:
+                pass
             conn.close()
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -1278,6 +1786,215 @@ def retrain_model():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+# --- Admin Review and Diagnostics Endpoints ---
+@app.route('/api/admin/biometric/diagnostics', methods=['GET'])
+def biometric_diagnostics():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+        
+    yunet_path = os.path.join('models', 'face_detection_yunet_2023mar.onnx')
+    sface_path = os.path.join('models', 'face_recognition_sface_2021dec.onnx')
+    
+    return jsonify({
+        "status": "success",
+        "detector_loaded": face_detector is not None,
+        "recognizer_loaded": face_recognizer is not None,
+        "detector_model_filename": os.path.basename(yunet_path) if os.path.exists(yunet_path) else "missing",
+        "recognizer_model_filename": os.path.basename(sface_path) if os.path.exists(sface_path) else "missing",
+        "detector_model_exists": os.path.exists(yunet_path),
+        "recognizer_model_exists": os.path.exists(sface_path)
+    })
+
+@app.route('/api/admin/reviews', methods=['GET'])
+def admin_get_reviews():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM pending_transactions WHERE status = 'PENDING_REVIEW'")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    reviews = []
+    for r in rows:
+        reviews.append({
+            "token": r['token'],
+            "user_id": r['user_id'],
+            "receiver": r['receiver'],
+            "amount": r['amount'],
+            "ttype": r['ttype'],
+            "risk_score": r['risk_score'],
+            "risk_level": r['risk_level'],
+            "reasons": json.loads(r['reasons']),
+            "expires_at": r['expires_at']
+        })
+    return jsonify({"status": "success", "reviews": reviews})
+
+@app.route('/api/admin/review/action', methods=['POST'])
+def admin_review_action():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+        
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "error", "message": "Missing request payload."}), 400
+        
+    token = data.get('transaction_token')
+    action = data.get('action') # 'APPROVE' or 'REJECT'
+    reason = data.get('reason', '').strip()
+    reviewer = session['username']
+    
+    if not token or action not in ['APPROVE', 'REJECT']:
+        return jsonify({"status": "error", "message": "Invalid review parameters."}), 400
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Atomic transaction
+        cursor.execute("BEGIN TRANSACTION")
+        
+        # Check current status is strictly PENDING_REVIEW
+        cursor.execute("SELECT * FROM pending_transactions WHERE token = ? AND status = 'PENDING_REVIEW'", (token,))
+        pending = cursor.fetchone()
+        
+        if not pending:
+            cursor.execute("ROLLBACK")
+            conn.close()
+            return jsonify({"status": "error", "message": "Transaction not found, expired, or already reviewed."}), 404
+            
+        sender_id = pending['user_id']
+        receiver = pending['receiver']
+        amount = pending['amount']
+        ttype = pending['ttype']
+        risk_score = pending['risk_score']
+        risk_level = pending['risk_level']
+        reasons = json.loads(pending['reasons']) if pending['reasons'] else []
+        
+        cursor.execute("SELECT USERNAME, BAL FROM NEWBANK WHERE ID = ?", (sender_id,))
+        sender_row = cursor.fetchone()
+        sender_username = sender_row['USERNAME'] if sender_row else None
+        sender_bal = sender_row['BAL'] if sender_row else 0.0
+        
+        # Enforce idempotency - conditional status update
+        target_status = 'COMPLETED' if action == 'APPROVE' else 'BLOCKED'
+        cursor.execute("UPDATE pending_transactions SET status = ? WHERE token = ? AND status = 'PENDING_REVIEW'", (target_status, token))
+        
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            conn.close()
+            return jsonify({"status": "error", "message": "Concurrency error: Transaction already processed."}), 409
+            
+        if action == 'APPROVE':
+            # Recheck balance inside the same SQLite atomic transaction
+            if sender_bal < amount:
+                cursor.execute("UPDATE pending_transactions SET status = 'FAILED' WHERE token = ?", (token,))
+                cursor.execute("COMMIT")
+                conn.close()
+                return jsonify({"status": "error", "message": "Insufficient balance for approval."}), 400
+                
+            sender_new_bal = sender_bal - amount
+            
+            # Check receiver account type (CASH_OUT channel vs TRANSFER user)
+            if ttype == 'TRANSFER':
+                cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+                receiver_row = cursor.fetchone()
+                receiver_bal = receiver_row['BAL'] if receiver_row else 0.0
+                receiver_new_bal = receiver_bal + amount
+                cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE USERNAME = ?", (receiver_new_bal, receiver))
+            else: # CASH_OUT
+                # CASH_OUT destination channel
+                receiver_bal = 0.0
+                receiver_new_bal = 0.0
+                
+            cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE ID = ?", (sender_new_bal, sender_id))
+            
+            # Record decision trace
+            decision_trace = json.loads(pending['decision_trace'])
+            decision_trace['reviewer'] = reviewer
+            decision_trace['review_action'] = 'APPROVED'
+            decision_trace['review_reason'] = reason
+            decision_trace['review_timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Create ledger entry exactly once
+            cursor.execute('''
+            INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?)
+            ''', (sender_username, receiver, ttype, amount, sender_bal, sender_new_bal, receiver_bal, receiver_new_bal, pending['is_fraud_predicted'], json.dumps(decision_trace)))
+            
+            tx_id = cursor.lastrowid
+            
+            # Create audit record exactly once
+            cursor.execute('''
+            INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+            VALUES (?, 'TRANSACTION_APPROVED_BY_ADMIN', 'MEDIUM', ?)
+            ''', (sender_id, f"Admin approved transaction {amount} to {receiver}. Reason: {reason}"))
+            
+            # Send Socket.IO notifications
+            tx_event = {
+                'id': tx_id,
+                'sender': sender_username[0] + '***' + sender_username[-1] if len(sender_username) > 1 else sender_username,
+                'receiver': receiver[0] + '***' + receiver[-1] if len(receiver) > 1 else receiver,
+                'ttype': ttype,
+                'amount': amount,
+                'status': 'APPROVED',
+                'risk_score': risk_score,
+                'risk_level': risk_level,
+                'reasons': reasons,
+                'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            socketio.emit('new_transaction', tx_event, to='admin_room')
+            
+        else: # REJECT
+            # Record decision trace
+            decision_trace = json.loads(pending['decision_trace'])
+            decision_trace['reviewer'] = reviewer
+            decision_trace['review_action'] = 'REJECTED'
+            decision_trace['review_reason'] = reason
+            decision_trace['review_timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Create ledger entry exactly once (mark as BLOCKED)
+            cursor.execute('''
+            INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BLOCKED', ?, ?)
+            ''', (sender_username, receiver, ttype, amount, sender_bal, sender_bal, 0.0, 0.0, pending['is_fraud_predicted'], json.dumps(decision_trace)))
+            
+            tx_id = cursor.lastrowid
+            
+            # Create audit record exactly once
+            cursor.execute('''
+            INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+            VALUES (?, 'TRANSACTION_REJECTED_BY_ADMIN', 'HIGH', ?)
+            ''', (sender_id, f"Admin rejected transaction {amount} to {receiver}. Reason: {reason}"))
+            
+            tx_event = {
+                'id': tx_id,
+                'sender': sender_username[0] + '***' + sender_username[-1] if len(sender_username) > 1 else sender_username,
+                'receiver': receiver[0] + '***' + receiver[-1] if len(receiver) > 1 else receiver,
+                'ttype': ttype,
+                'amount': amount,
+                'status': 'BLOCKED',
+                'risk_score': risk_score,
+                'risk_level': risk_level,
+                'reasons': reasons,
+                'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            socketio.emit('new_transaction', tx_event, to='admin_room')
+            
+        cursor.execute("COMMIT")
+        conn.close()
+        return jsonify({"status": "success", "message": f"Transaction successfully {action.lower()}ed."})
+        
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            cursor.execute("ROLLBACK")
+        except:
+            pass
+        conn.close()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Admin Audit endpoints ---
 @app.route('/api/admin/users', methods=['GET'])
@@ -1586,4 +2303,5 @@ def handle_join_admin():
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5001))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+    socketio.run(app, host='0.0.0.0', port=port, debug=is_dev, use_reloader=False, allow_unsafe_werkzeug=is_dev)

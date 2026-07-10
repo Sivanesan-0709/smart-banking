@@ -115,7 +115,9 @@ def train_and_save():
     print("Confusion Matrix:\n", np.array(cm))
     
     # Save model pipeline
-    model_path = r"c:\Users\User\OneDrive\Desktop\Smart Banking and Fraud Detection System\banking_app_rf.pkl"
+    import os
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(BASE_DIR, 'banking_app_rf.pkl')
     joblib.dump(pipeline, model_path)
     print(f"\nTrained model pipeline saved successfully to {model_path}")
     
@@ -131,7 +133,7 @@ def train_and_save():
         "fraud_percentage": round((df['isFraud'].sum() / len(df)) * 100, 2)
     }
     
-    metrics_path = r"c:\Users\User\OneDrive\Desktop\Smart Banking and Fraud Detection System\model_metrics.json"
+    metrics_path = os.path.join(BASE_DIR, 'model_metrics.json')
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=4)
     print(f"Model metrics saved to {metrics_path}")

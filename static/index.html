@@ -313,6 +313,33 @@
                                         <div class="progress-bar-container">
                                             <div class="progress-bar-fill" id="barAccuracy" style="width: 0%"></div>
                                         </div>
+                    <div class="metric-progress-item" style="margin-top: 15px;">
+                        <div class="progress-info">
+                            <span>Trained Samples</span>
+                            <span class="metric-val" id="modelSamples">0</span>
+                        </div>
+                    </div>
+                    <div class="confusion-matrix-container" style="margin-top: 15px;">
+                        <span style="font-size: 0.85rem; font-weight: 500; color: var(--text-secondary);">Confusion Matrix</span>
+                        <div class="confusion-matrix-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; font-size: 0.75rem;">
+                            <div style="background: rgba(255,255,255,0.03); padding: 8px; border-radius: 4px; text-align: center;">
+                                <div style="color: var(--text-secondary);">True Neg (TN)</div>
+                                <div id="matrixTN" style="font-weight: bold; color: var(--text-primary); font-size: 0.95rem;">0</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.03); padding: 8px; border-radius: 4px; text-align: center;">
+                                <div style="color: var(--text-secondary);">False Pos (FP)</div>
+                                <div id="matrixFP" style="font-weight: bold; color: var(--text-primary); font-size: 0.95rem;">0</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.03); padding: 8px; border-radius: 4px; text-align: center;">
+                                <div style="color: var(--text-secondary);">False Neg (FN)</div>
+                                <div id="matrixFN" style="font-weight: bold; color: var(--text-primary); font-size: 0.95rem;">0</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.03); padding: 8px; border-radius: 4px; text-align: center;">
+                                <div style="color: var(--text-secondary);">True Pos (TP)</div>
+                                <div id="matrixTP" style="font-weight: bold; color: var(--text-primary); font-size: 0.95rem;">0</div>
+                            </div>
+                        </div>
+                    </div>
                                     </div>
                                 </div>
 
@@ -539,6 +566,33 @@
                         </div>
                     </div>
 
+                    <!-- Critical Transactions Pending Review Queue -->
+                    <div class="glass-card" id="adminReviewQueueCard" style="margin-bottom: 24px;">
+                        <h2><i class="fa-solid fa-user-shield logo-glow" style="color: var(--warning-color);"></i> Critical Transactions Pending Review Queue</h2>
+                        <p class="section-desc">Transactions with a risk score >= 90 are held here. They require manual auditor approval or rejection before funds are transferred.</p>
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Token</th>
+                                        <th>Sender ID</th>
+                                        <th>Receiver</th>
+                                        <th>Type</th>
+                                        <th>Amount</th>
+                                        <th>Risk Score</th>
+                                        <th>Reasons</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="adminReviewQueueBody">
+                                    <tr>
+                                        <td colspan="8" class="text-center text-muted">No transactions pending review.</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
                     <!-- Ledger / Users Grid -->
                     <div class="admin-ledger-grid">
                         <div class="glass-card">
@@ -728,24 +782,32 @@
                 <!-- STEP 1: OTP VERIFICATION -->
                 <div id="mfaStepOtp">
                     <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 12px; text-align: center;">
-                        This high-risk transaction requires verification. Enter the OTP code sent to your device.
+                        This transaction requires additional security verification.
                     </p>
-                    <div class="simulated-otp-alert" id="mfaSimulatedOtpAlert" style="background: rgba(0, 245, 212, 0.1); border: 1px solid rgba(0, 245, 212, 0.2); border-radius: 8px; padding: 12px; margin-bottom: 18px; text-align: center; font-size: 0.85rem; color: #00f5d4; display: flex; align-items: center; justify-content: center; gap: 8px;">
-                        <span><i class="fa-solid fa-mobile-screen-button"></i> SMS Alert (Demo OTP):</span>
-                        <strong id="mfaSimulatedOtpText" style="font-size: 1.1rem; letter-spacing: 2px;">123456</strong>
+                    <div class="simulated-otp-alert" id="mfaSimulatedOtpAlert" style="background: rgba(0, 245, 212, 0.08); border: 1px solid rgba(0, 245, 212, 0.2); border-radius: 8px; padding: 12px; margin-bottom: 18px; text-align: center; font-size: 0.85rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;">
+                        <span style="color: var(--text-secondary);"><i class="fa-solid fa-envelope"></i> Verification Code Sent To:</span>
+                        <strong id="mfaMaskedEmail" style="font-size: 1.05rem; letter-spacing: 1px; color: #fff;">s***n@gmail.com</strong>
+                        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px;">
+                            Expires in: <span id="mfaOtpTimer" style="font-weight: bold; color: #00f5d4;">05:00</span>
+                        </div>
                     </div>
                     
                     <form id="mfaOtpForm" onsubmit="handleMfaOtpSubmit(event)">
                         <div class="input-group">
                             <label for="mfaOtpCode" style="justify-content: center; font-size: 0.8rem; margin-bottom: 6px;">Enter 6-Digit OTP</label>
-                            <input type="text" id="mfaOtpCode" class="otp-input-field" placeholder="••••••" required maxlength="6" pattern="\d{6}" style="text-align: center; font-size: 1.5rem; letter-spacing: 6px; font-weight: 700; height: 48px; background: rgba(0,0,0,0.25); color: #fff; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;">
+                            <input type="text" id="mfaOtpCode" class="otp-input-field" placeholder="000000" required maxlength="6" pattern="\d{6}" style="text-align: center; font-size: 1.5rem; letter-spacing: 6px; font-weight: 700; height: 48px; background: rgba(0,0,0,0.25); color: #fff; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;">
                         </div>
-                        <button type="submit" class="btn btn-accent btn-block" style="height: 46px; margin-top: 15px;">
-                            <span>Confirm OTP Code</span> <i class="fa-solid fa-arrow-right"></i>
-                        </button>
+                        <div style="display: flex; gap: 10px; margin-top: 15px;">
+                            <button type="button" id="mfaResendOtpBtn" class="btn btn-outline" style="height: 44px; flex: 1; font-size: 0.8rem; border: 1px solid rgba(255,255,255,0.15);" onclick="handleMfaOtpResend()">
+                                Resend OTP (60s)
+                            </button>
+                            <button type="submit" id="mfaSubmitOtpBtn" class="btn btn-accent" style="height: 44px; flex: 1; font-size: 0.8rem;">
+                                <span>Confirm OTP</span> <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
                     </form>
                 </div>
-                
+
                 <!-- STEP 2: FACE LIVENESS AND 1:1 MATCH -->
                 <div id="mfaStepFace" class="hidden">
                     <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 12px; text-align: center;">

@@ -16,6 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
     checkAuthSession();
     initSocket();
     initLiveRiskMeter();
+    loadModelMetrics();
     
     // Bind pause live feed checkbox
     const pauseCheckbox = document.getElementById('pauseLiveFeed');
@@ -260,6 +261,7 @@ function handleLogout() {
             showToast('Logged Out', 'Session terminated successfully.', 'info');
             showAuthLayout();
         });
+    loadAdminReviewQueue();
 }
 
 // Client overview loaders
@@ -593,6 +595,12 @@ function handleTransfer(e) {
             showSuspiciousBlockedAlert(data);
             showDecisionTrace(0, data.level, data.score, data.reasons, false, false, false, "Blocked by Threat Model");
             loadDashboardData();
+        } 
+        else if (data.status === 'pending_review') {
+            showToast('Review Required', 'Transaction queued for manual administrator review.', 'warning');
+            document.getElementById('transferForm').reset();
+            loadDashboardData();
+            showDecisionTrace(0, data.level, data.score, data.reasons, false, false, false, "Pending Review");
         } else {
             showToast('Transfer Error', data.message || 'Error occurred.', 'error');
         }
@@ -600,21 +608,89 @@ function handleTransfer(e) {
     .catch(() => showToast('Network Error', 'Could not initiate transfer.', 'error'));
 }
 
+let otpExpiryInterval = null;
+let resendCooldownInterval = null;
+
+function startOtpTimer(durationSeconds) {
+    if (otpExpiryInterval) clearInterval(otpExpiryInterval);
+    let timeRemaining = durationSeconds;
+    const timerSpan = document.getElementById('mfaOtpTimer');
+    if (!timerSpan) return;
+    
+    function updateTimer() {
+        const minutes = Math.floor(timeRemaining / 60);
+        const seconds = timeRemaining % 60;
+        timerSpan.innerText = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        if (timeRemaining <= 0) {
+            clearInterval(otpExpiryInterval);
+            timerSpan.innerText = "EXPIRED";
+            showToast('OTP Expired', 'The OTP verification window has expired. Please initiate a new transaction.', 'error');
+            const submitBtn = document.getElementById('mfaSubmitOtpBtn');
+            if (submitBtn) submitBtn.disabled = true;
+        }
+        timeRemaining--;
+    }
+    updateTimer();
+    otpExpiryInterval = setInterval(updateTimer, 1000);
+}
+
+function startResendCooldown(durationSeconds) {
+    if (resendCooldownInterval) clearInterval(resendCooldownInterval);
+    let cooldownRemaining = durationSeconds;
+    const resendBtn = document.getElementById('mfaResendOtpBtn');
+    if (!resendBtn) return;
+    resendBtn.disabled = true;
+    
+    function updateCooldown() {
+        if (cooldownRemaining <= 0) {
+            clearInterval(resendCooldownInterval);
+            resendBtn.innerText = "Resend OTP";
+            resendBtn.disabled = false;
+        } else {
+            resendBtn.innerText = `Resend OTP (${cooldownRemaining}s)`;
+            cooldownRemaining--;
+        }
+    }
+    updateCooldown();
+    resendCooldownInterval = setInterval(updateCooldown, 1000);
+}
+
 function openMfaModal(data) {
     document.getElementById('mfaModal').classList.remove('hidden');
     document.getElementById('mfaStepOtp').classList.remove('hidden');
     document.getElementById('mfaStepFace').classList.add('hidden');
-    document.getElementById('mfaSimulatedOtpText').innerText = data.otp;
+    
+    sessionStorage.setItem('mfa_transaction_token', data.transaction_token);
+    sessionStorage.setItem('mfa_required', JSON.stringify(data.required));
+    
+    const emailSpan = document.getElementById('mfaMaskedEmail');
+    if (emailSpan) emailSpan.innerText = data.masked_email;
     document.getElementById('mfaOtpCode').value = '';
     document.getElementById('mfaOtpCode').focus();
+    
+    const submitBtn = document.getElementById('mfaSubmitOtpBtn');
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<span>Confirm OTP</span> <i class="fa-solid fa-arrow-right"></i>';
+    }
+    
     faceAttempts = 0;
     
-    sessionStorage.setItem('mfa_required', JSON.stringify(data.required));
+    startOtpTimer(data.expires_in || 300);
+    startResendCooldown(60);
 }
 
 function closeMfaModal() {
     document.getElementById('mfaModal').classList.add('hidden');
     stopMfaWebcam();
+    if (otpExpiryInterval) {
+        clearInterval(otpExpiryInterval);
+        otpExpiryInterval = null;
+    }
+    if (resendCooldownInterval) {
+        clearInterval(resendCooldownInterval);
+        resendCooldownInterval = null;
+    }
 }
 
 function stopMfaWebcam() {
@@ -633,14 +709,26 @@ function stopMfaWebcam() {
 function handleMfaOtpSubmit(e) {
     e.preventDefault();
     const otp = document.getElementById('mfaOtpCode').value.trim();
+    const transaction_token = sessionStorage.getItem('mfa_transaction_token');
+    
+    const submitBtn = document.getElementById('mfaSubmitOtpBtn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span>Verifying...</span> <i class="fa-solid fa-spinner fa-spin"></i>';
+    }
     
     fetch('/api/transfer/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ otp })
+        body: JSON.stringify({ transaction_token, otp })
     })
     .then(async res => {
         const data = await res.json();
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<span>Confirm OTP</span> <i class="fa-solid fa-arrow-right"></i>';
+        }
+        
         if (res.status === 200) {
             if (data.status === 'success') {
                 showToast('Transfer Approved', data.message, 'success');
@@ -648,9 +736,8 @@ function handleMfaOtpSubmit(e) {
                 document.getElementById('transferForm').reset();
                 loadDashboardData();
                 
-                // Show trace
                 showDecisionTrace(
-                    data.new_balance, 
+                    data.new_balance,
                     sessionStorage.getItem('current_risk_level'),
                     sessionStorage.getItem('current_risk_score'),
                     JSON.parse(sessionStorage.getItem('current_reasons')),
@@ -664,9 +751,51 @@ function handleMfaOtpSubmit(e) {
             }
         } else {
             showToast('OTP Error', data.message || 'OTP verification failed.', 'error');
+            document.getElementById('mfaOtpCode').value = '';
+            document.getElementById('mfaOtpCode').focus();
         }
     })
-    .catch(() => showToast('Network Error', 'Could not verify OTP code.', 'error'));
+    .catch(() => {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<span>Confirm OTP</span> <i class="fa-solid fa-arrow-right"></i>';
+        }
+        showToast('Network Error', 'Could not verify OTP code.', 'error');
+    });
+}
+
+function handleMfaOtpResend() {
+    const transaction_token = sessionStorage.getItem('mfa_transaction_token');
+    const resendBtn = document.getElementById('mfaResendOtpBtn');
+    if (!resendBtn) return;
+    
+    resendBtn.disabled = true;
+    resendBtn.innerText = 'Sending...';
+    
+    fetch('/api/otp/resend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction_token })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200) {
+            showToast('OTP Resent', data.message, 'success');
+            const submitBtn = document.getElementById('mfaSubmitOtpBtn');
+            if (submitBtn) submitBtn.disabled = false;
+            startOtpTimer(data.expires_in || 300);
+            startResendCooldown(60);
+        } else {
+            showToast('Resend Error', data.message || 'Failed to resend verification code.', 'error');
+            resendBtn.innerText = 'Resend OTP';
+            resendBtn.disabled = false;
+        }
+    })
+    .catch(() => {
+        showToast('Network Error', 'Could not resend OTP code.', 'error');
+        resendBtn.innerText = 'Resend OTP';
+        resendBtn.disabled = false;
+    });
 }
 
 function initMfaVerificationChallenge() {
@@ -1546,3 +1675,127 @@ function closeXaiTraceModal() {
     document.getElementById('xaiTraceModal').classList.add('hidden');
 }
 
+
+// --- Model Metrics and Admin Review Helpers ---
+function loadModelMetrics() {
+    fetch('/api/model/metrics')
+        .then(res => res.json())
+        .then(data => {
+            const mAcc = document.getElementById('modelAccuracy');
+            const mPrec = document.getElementById('modelPrecision');
+            const mRec = document.getElementById('modelRecall');
+            const mF1 = document.getElementById('modelF1');
+            const mSamples = document.getElementById('modelSamples');
+            
+            const bAcc = document.getElementById('barAccuracy');
+            const bPrec = document.getElementById('barPrecision');
+            const bRec = document.getElementById('barRecall');
+            const bF1 = document.getElementById('barF1');
+            
+            const tn = document.getElementById('matrixTN');
+            const fp = document.getElementById('matrixFP');
+            const fn = document.getElementById('matrixFN');
+            const tp = document.getElementById('matrixTP');
+            
+            if (data.status === 'active') {
+                const accStr = (data.accuracy * 100).toFixed(2) + '%';
+                const precStr = (data.precision * 100).toFixed(2) + '%';
+                const recStr = (data.recall * 100).toFixed(2) + '%';
+                const f1Str = (data.f1_score * 100).toFixed(2) + '%';
+                
+                if (mAcc) { mAcc.innerText = accStr; bAcc.style.width = accStr; }
+                if (mPrec) { mPrec.innerText = precStr; bPrec.style.width = precStr; }
+                if (mRec) { mRec.innerText = recStr; bRec.style.width = recStr; }
+                if (mF1) { mF1.innerText = f1Str; bF1.style.width = f1Str; }
+                if (mSamples) mSamples.innerText = data.n_samples.toLocaleString();
+                
+                if (tn) tn.innerText = data.confusion_matrix[0][0];
+                if (fp) fp.innerText = data.confusion_matrix[0][1];
+                if (fn) fn.innerText = data.confusion_matrix[1][0];
+                if (tp) tp.innerText = data.confusion_matrix[1][1];
+            } else {
+                const na = 'Unavailable';
+                if (mAcc) mAcc.innerText = na;
+                if (mPrec) mPrec.innerText = na;
+                if (mRec) mRec.innerText = na;
+                if (mF1) mF1.innerText = na;
+                if (mSamples) mSamples.innerText = na;
+            }
+        })
+        .catch(() => {
+            const na = 'Unavailable';
+            const mAcc = document.getElementById('modelAccuracy');
+            if (mAcc) mAcc.innerText = na;
+            const mPrec = document.getElementById('modelPrecision');
+            if (mPrec) mPrec.innerText = na;
+            const mRec = document.getElementById('modelRecall');
+            if (mRec) mRec.innerText = na;
+            const mF1 = document.getElementById('modelF1');
+            if (mF1) mF1.innerText = na;
+            const mSamples = document.getElementById('modelSamples');
+            if (mSamples) mSamples.innerText = na;
+        });
+}
+
+function loadAdminReviewQueue() {
+    fetch('/api/admin/reviews')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const tbody = document.getElementById('adminReviewQueueBody');
+                if (!tbody) return;
+                tbody.innerHTML = '';
+                
+                if (data.reviews.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No transactions pending review.</td></tr>';
+                    return;
+                }
+                
+                data.reviews.forEach(rev => {
+                    const row = document.createElement('tr');
+                    
+                    const tokenTrunc = rev.token.substring(0, 8) + '...';
+                    const reasonsStr = rev.reasons.join(', ');
+                    
+                    row.innerHTML = `
+                        <td title="${rev.token}">${tokenTrunc}</td>
+                        <td>${rev.user_id}</td>
+                        <td>${rev.receiver}</td>
+                        <td><span class="badge">${rev.ttype}</span></td>
+                        <td>?${parseFloat(rev.amount).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                        <td><span class="badge badge-danger">${rev.risk_score} (${rev.risk_level})</span></td>
+                        <td class="text-muted" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${reasonsStr}">${reasonsStr}</td>
+                        <td>
+                            <div style="display: flex; gap: 5px;">
+                                <button class="btn btn-xs btn-success" onclick="handleReviewAction('${rev.token}', 'APPROVE')">Approve</button>
+                                <button class="btn btn-xs btn-danger" onclick="handleReviewAction('${rev.token}', 'REJECT')">Reject</button>
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+        });
+}
+
+function handleReviewAction(token, action) {
+    const reason = prompt(`Enter reason for ${action.toLowerCase()}ing this transaction:`);
+    if (reason === null) return; // cancelled
+    
+    fetch('/api/admin/review/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction_token: token, action: action, reason: reason })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'success') {
+            showToast('Review Complete', data.message, 'success');
+            loadAdminReviewQueue();
+            loadAdminData();
+        } else {
+            showToast('Review Error', data.message, 'error');
+        }
+    })
+    .catch(() => showToast('Network Error', 'Could not submit review decision.', 'error'));
+}
