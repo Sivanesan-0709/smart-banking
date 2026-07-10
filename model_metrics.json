@@ -1,0 +1,19 @@
+{
+    "status": "active",
+    "accuracy": 0.9998,
+    "precision": 0.9975,
+    "recall": 1.0,
+    "f1_score": 0.9988,
+    "confusion_matrix": [
+        [
+            4599,
+            1
+        ],
+        [
+            0,
+            400
+        ]
+    ],
+    "n_samples": 25000,
+    "fraud_percentage": 8.0
+}
