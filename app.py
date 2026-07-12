@@ -1219,6 +1219,11 @@ def transfer_initiate():
         sender_row = cursor.fetchone()
         sender_balance = sender_row['BAL']
         sender_email = sender_row['EMAIL']
+        if not sender_email:
+            conn.close()
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+            return jsonify({"status": "error", "message": "Registered email address not found."}), 404
 
         if sender_balance < amount:
             conn.close()
@@ -1377,8 +1382,6 @@ def transfer_initiate():
         print(f"[DEBUG] [Step 13: Database commit completed ({risk_level})] took {time.time() - t_commit:.4f}s", flush=True)
         conn.close()
 
-        if not sender_email:
-            sender_email = f"{sender}@smartbanking.com"
 
         t_mail = time.time()
         print(f"[DEBUG] [Step 9: SMTP email send started] To: {sender_email}", flush=True)
@@ -1550,6 +1553,13 @@ def otp_resend():
         
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = ?", (user_id,))
+        email_row = cursor.fetchone()
+        email = email_row['EMAIL'] if email_row else None
+        if not email:
+            conn.close()
+            return jsonify({"status": "error", "message": "Registered email address not found."}), 404
         
         cursor.execute('''
         SELECT * FROM transaction_otp_challenges 
@@ -1600,10 +1610,6 @@ def otp_resend():
         WHERE token = ?
         ''', (expires_at, token))
         
-        cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = ?", (user_id,))
-        email = cursor.fetchone()['EMAIL']
-        if not email:
-            email = f"{username}@smartbanking.com"
             
         cursor.execute("SELECT amount, receiver FROM pending_transactions WHERE token = ?", (token,))
         pending_tx = cursor.fetchone()

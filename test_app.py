@@ -1227,5 +1227,98 @@ class BankAppTestCase(unittest.TestCase):
         self.assertIn('submitBtn.disabled = false;', content)
 
 
+    def test_otp_recipient_hardening(self):
+        # 1. Registered user receives OTP to their real DB email
+        self.register_user('user_real_email', 'real_email@test.com', 'pass123', 'pass123', '08123456790', bal=100000.0)
+        self.register_user('rec_real_email', 'rec_email@test.com', 'pass123', 'pass123', '08123456791')
+        self.login_user('user_real_email', 'pass123')
+        
+        self.captured_otps.clear()
+        
+        # We need a custom mock to track recipient email
+        sent_emails = []
+        import app as app_module
+        def mock_send(email, otp, amount, receiver):
+            sent_emails.append((email, otp))
+            self.captured_otps.append(otp)
+            return True
+        app_module.send_otp_email = mock_send
+        
+        res = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'rec_real_email',
+            'amount': '15000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        self.assertEqual(res.status_code, 200)
+        
+        # Verify email recipient is the sender, not SMTP config, not receiver
+        self.assertEqual(len(sent_emails), 1)
+        self.assertEqual(sent_emails[0][0], 'real_email@test.com')
+        self.assertNotEqual(sent_emails[0][0], 'rec_email@test.com')
+        
+        # 2. Resend OTP uses NEWBANK.EMAIL
+        token = json.loads(res.data)['transaction_token']
+        # Update last_sent_at in DB to bypass 60-second cooldown
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE transaction_otp_challenges SET last_sent_at = datetime('now', '-10 minutes') WHERE transaction_token = ?", (token,))
+            conn.commit()
+            conn.close()
+
+        res_resend = self.client.post('/api/otp/resend', data=json.dumps({
+            'transaction_token': token
+        }), content_type='application/json')
+        self.assertEqual(res_resend.status_code, 200)
+        self.assertEqual(sent_emails[1][0], 'real_email@test.com')
+
+        # 3. Missing email returns HTTP 404, does NOT create pending OTP/transaction records
+        # Insert a user directly with no email
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = 'user_no_email'")
+            existing = cursor.fetchone()
+            if not existing:
+                from werkzeug.security import generate_password_hash
+                cursor.execute('''
+                INSERT INTO NEWBANK (USERNAME, FIRSTNAME, LASTNAME, EMAIL, PASSWORD, CONFIRM, PHONE, SEX, ADDRESS, BAL)
+                VALUES ('user_no_email', 'No', 'Email', '', ?, '', '08123456792', 'Male', 'Addr', 50000.0)
+                ''', (generate_password_hash('pass123'),))
+                conn.commit()
+            conn.close()
+
+        self.login_user('user_no_email', 'pass123')
+        sent_emails.clear()
+        
+        res_init_fail = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'rec_real_email',
+            'amount': '15000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        
+        self.assertEqual(res_init_fail.status_code, 404)
+        data_fail = json.loads(res_init_fail.data)
+        self.assertEqual(data_fail['status'], 'error')
+        self.assertEqual(data_fail['message'], 'Registered email address not found.')
+        
+        # Verify no OTP was sent
+        self.assertEqual(len(sent_emails), 0)
+        
+        # Verify no transaction or OTP challenge exists in DB for this attempt
+        with app.app_context():
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM pending_transactions WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'user_no_email')")
+            txs = cursor.fetchall()
+            self.assertEqual(len(txs), 0)
+            cursor.execute("SELECT * FROM transaction_otp_challenges WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'user_no_email')")
+            challenges = cursor.fetchall()
+            self.assertEqual(len(challenges), 0)
+            conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()
