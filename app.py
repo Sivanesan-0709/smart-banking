@@ -16,6 +16,7 @@ import base64
 import cv2
 import random
 import sys
+import time
 import secrets
 import hashlib
 import hmac
@@ -102,10 +103,10 @@ def send_otp_email(recipient_email, otp, amount, receiver):
     
     try:
         if smtp_use_tls:
-            server = smtplib.SMTP(smtp_host, int(smtp_port))
+            server = smtplib.SMTP(smtp_host, int(smtp_port), timeout=10.0)
             server.starttls()
         else:
-            server = smtplib.SMTP_SSL(smtp_host, int(smtp_port))
+            server = smtplib.SMTP_SSL(smtp_host, int(smtp_port), timeout=10.0)
         
         server.login(smtp_username, smtp_password)
         server.send_message(msg)
@@ -1129,73 +1130,111 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
 # --- Transaction API endpoints ---
 @app.route('/api/transfer/initiate', methods=['POST'])
 def transfer_initiate():
-    if 'username' not in session:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-        
+    start_time = time.time()
+    print("START /api/transfer/initiate", flush=True)
+    
+    conn = None
     try:
+        print(f"[DEBUG] [Step 1: Request received] elapsed: {time.time() - start_time:.4f}s", flush=True)
+        
+        if 'username' not in session:
+            print(f"[DEBUG] [Step 2: User authentication failed] elapsed: {time.time() - start_time:.4f}s", flush=True)
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+            
+        print(f"[DEBUG] [Step 2: User authentication verified] User: {session['username']}", flush=True)
+        
         data = request.get_json()
         if not data:
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Missing request payload."}), 400
-            
+
         receiver = data.get('receiver', '').strip()
         amount_str = data.get('amount', '0')
         ttype = data.get('type', 'TRANSFER').strip().upper()
-        
+
         try:
             amount = float(amount_str)
         except ValueError:
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Invalid transfer amount format."}), 400
-            
+
         if amount <= 0:
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Transfer amount must be greater than zero."}), 400
-            
+
         sender = session['username']
         sender_id = session.get('user_id')
-        
+
+        t_db = time.time()
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+        print(f"[DEBUG] [Database connection opened] took {time.time() - t_db:.4f}s", flush=True)
+
         # Check transaction type
         if ttype not in ['TRANSFER', 'CASH_OUT']:
             conn.close()
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Invalid transaction type."}), 400
-            
+
         # Check receiver exists based on transaction type
+        t_rec = time.time()
         if ttype == 'TRANSFER':
             cursor.execute("SELECT ID, BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
             receiver_row = cursor.fetchone()
             if not receiver_row:
                 conn.close()
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
                 return jsonify({"status": "error", "message": "Receiver username not found."}), 404
             if receiver == sender:
                 conn.close()
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
                 return jsonify({"status": "error", "message": "Cannot transfer to yourself."}), 400
         else: # CASH_OUT
             cursor.execute("SELECT * FROM cash_out_channels WHERE id = ? AND status = 'ACTIVE'", (receiver,))
             channel_row = cursor.fetchone()
             if not channel_row:
                 conn.close()
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
                 return jsonify({"status": "error", "message": "Invalid or inactive cash out channel."}), 400
             if receiver == sender:
                 conn.close()
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
                 return jsonify({"status": "error", "message": "Cannot cash out to yourself."}), 400
             receiver_row = {'BAL': 0.0}
-            
+        print(f"[DEBUG] [Step 3: Recipient validation completed] took {time.time() - t_rec:.4f}s", flush=True)
+
         # Get sender details
+        t_bal = time.time()
         cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE USERNAME = ?", (sender,))
         sender_row = cursor.fetchone()
         sender_balance = sender_row['BAL']
         sender_email = sender_row['EMAIL']
-        
+
         if sender_balance < amount:
             conn.close()
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Insufficient balance."}), 400
-            
+        print(f"[DEBUG] [Step 4: Balance validation completed] took {time.time() - t_bal:.4f}s", flush=True)
+
         # Run Hybrid Risk Engine
+        t_risk = time.time()
         risk_score, risk_level, reasons, is_fraud_predicted, breakdown, ml_probability = compute_hybrid_risk(
             sender_id, sender, receiver, amount, ttype
         )
-        
+        print(f"[DEBUG] [Step 5: Risk score calculated] Score: {risk_score}, Level: {risk_level}, took {time.time() - t_risk:.4f}s", flush=True)
+        print(f"[DEBUG] [Step 6: Risk classification completed] Level: {risk_level}", flush=True)
+
         # Prepare decision trace
         feature_importances = {}
         if model is not None:
@@ -1209,7 +1248,7 @@ def transfer_initiate():
                 feature_importances = dict(zip(feature_names, importances))
             except:
                 pass
-                
+
         decision_trace = {
             "risk_score": risk_score,
             "risk_level": risk_level,
@@ -1220,58 +1259,71 @@ def transfer_initiate():
             "auth_required": [],
             "auth_completed": []
         }
-        
+
         if risk_level == 'MEDIUM':
             decision_trace['auth_required'] = ['otp']
         elif risk_level == 'HIGH':
             decision_trace['auth_required'] = ['otp', 'face']
         elif risk_level == 'CRITICAL':
             decision_trace['auth_required'] = ['admin_review']
-            
+
         # Check if user has biometric face profile enrolled
         cursor.execute("SELECT id FROM face_enrollments WHERE user_id = ?", (sender_id,))
         has_face_enrolled = (cursor.fetchone() is not None)
-        
+
         # Enforce enrollment requirement for HIGH risk
         if risk_level == 'HIGH' and not has_face_enrolled:
             conn.close()
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({
                 "status": "error",
                 "message": "Biometric face enrollment is required to verify high-risk transactions. Please enroll your face first."
             }), 400
-            
+
         # Generate token
         token = secrets.token_urlsafe(32)
         expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # LOW RISK: Auto approve
         if risk_level == 'LOW':
+            print(f"[DEBUG] [Step 12: Pending transaction creation started (LOW)]", flush=True)
             cursor.execute('''
             INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, otp_verified, face_verified, expires_at, decision_trace)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
             ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
+            
+            t_commit = time.time()
             conn.commit()
+            print(f"[DEBUG] [Step 13: Database commit completed (LOW)] took {time.time() - t_commit:.4f}s", flush=True)
             
             res = finalize_pending_transaction(token)
             conn.close()
+            print(f"[DEBUG] [Step 14: JSON response returned (LOW)]", flush=True)
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return res
-            
+
         # CRITICAL RISK: Queue for Admin Review
         if risk_level == 'CRITICAL':
+            print(f"[DEBUG] [Step 12: Pending transaction creation started (CRITICAL)]", flush=True)
             cursor.execute('''
             INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, status, decision_trace)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_REVIEW', ?)
             ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
-            
+
             cursor.execute('''
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
             VALUES (?, 'TRANSACTION_HELD_FOR_REVIEW', 'HIGH', ?)
             ''', (sender_id, f"Transaction {amount} to {receiver} held for admin review due to CRITICAL risk score {risk_score}."))
-            
+
             tx_id = cursor.lastrowid
-            conn.commit()
-            conn.close()
             
+            t_commit = time.time()
+            conn.commit()
+            print(f"[DEBUG] [Step 13: Database commit completed (CRITICAL)] took {time.time() - t_commit:.4f}s", flush=True)
+            conn.close()
+
             tx_event = {
                 'id': tx_id,
                 'sender': sender[0] + '***' + sender[-1] if len(sender) > 1 else sender,
@@ -1285,7 +1337,10 @@ def transfer_initiate():
                 'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             socketio.emit('new_transaction', tx_event, to='admin_room')
-            
+
+            print(f"[DEBUG] [Step 14: JSON response returned (CRITICAL)]", flush=True)
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({
                 "status": "pending_review",
                 "message": "Security Alert: This transaction exhibits CRITICAL risk indicators. It has been queued for Administrator Review. No funds will move until approved.",
@@ -1294,39 +1349,57 @@ def transfer_initiate():
                 "level": risk_level,
                 "reasons": reasons
             })
-            
+
+        # MEDIUM/HIGH RISK: Needs Verification (OTP / Biometric Face)
+        t_otp_gen = time.time()
         otp = f"{secrets.randbelow(1000000):06d}"
         otp_hashed = hash_otp(otp)
-        
-        # Save pending transaction to DB
+        print(f"[DEBUG] [Step 7: OTP generation completed] took {time.time() - t_otp_gen:.4f}s", flush=True)
+
+        print(f"[DEBUG] [Step 12: Pending transaction creation started ({risk_level})]", flush=True)
         cursor.execute('''
         INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, decision_trace)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
-        
-        # Save OTP challenge
+
+        t_challenge = time.time()
         cursor.execute('''
         INSERT INTO transaction_otp_challenges (user_id, transaction_token, otp_hash, expires_at, last_sent_at)
         VALUES (?, ?, ?, ?, datetime('now'))
         ''', (sender_id, token, otp_hashed, expires_at))
+        print(f"[DEBUG] [Step 8: OTP database insert completed] took {time.time() - t_challenge:.4f}s", flush=True)
         
+        if risk_level == 'HIGH':
+            print(f"[DEBUG] [Step 11: Face verification challenge creation completed]", flush=True)
+
+        t_commit = time.time()
         conn.commit()
+        print(f"[DEBUG] [Step 13: Database commit completed ({risk_level})] took {time.time() - t_commit:.4f}s", flush=True)
         conn.close()
-        
+
         if not sender_email:
             sender_email = f"{sender}@smartbanking.com"
-            
+
+        t_mail = time.time()
+        print(f"[DEBUG] [Step 9: SMTP email send started] To: {sender_email}", flush=True)
         try:
             send_otp_email(sender_email, otp, amount, receiver)
+            print(f"[DEBUG] [Step 10: SMTP email send completed] took {time.time() - t_mail:.4f}s", flush=True)
         except Exception as mail_err:
+            print(f"[DEBUG] [SMTP email send failed] Error: {mail_err}", flush=True)
+            # Delete database records to prevent bypass
+            t_rollback = time.time()
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = ?", (token,))
             cursor.execute("DELETE FROM pending_transactions WHERE token = ?", (token,))
             conn.commit()
             conn.close()
+            print(f"[DEBUG] [Database rollback cleanup completed] took {time.time() - t_rollback:.4f}s", flush=True)
+            print("END /api/transfer/initiate", flush=True)
+            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Failed to send verification email. Please verify SMTP settings."}), 500
-        
+
         parts = sender_email.split('@')
         name = parts[0]
         domain = parts[1]
@@ -1335,11 +1408,14 @@ def transfer_initiate():
         else:
             masked_name = name[0] + '*'
         masked_email = f"{masked_name}@{domain}"
-        
+
         required_auths = ["otp"]
         if risk_level == 'HIGH':
             required_auths.append("face")
-            
+
+        print(f"[DEBUG] [Step 14: JSON response returned ({risk_level})]", flush=True)
+        print("END /api/transfer/initiate", flush=True)
+        print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
         return jsonify({
             "status": "verification_required",
             "required": required_auths,
@@ -1350,9 +1426,17 @@ def transfer_initiate():
             "level": risk_level,
             "reasons": reasons
         })
-        
+
     except Exception as e:
         traceback.print_exc()
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+        print(f"[DEBUG] [Unhandled exception caught] Error: {e}", flush=True)
+        print("END /api/transfer/initiate", flush=True)
+        print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/transfer/verify', methods=['POST'])

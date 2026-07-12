@@ -560,6 +560,17 @@ const maxFaceAttempts = 8;
 
 function handleTransfer(e) {
     e.preventDefault();
+    const submitBtn = document.querySelector('#transferForm button[type="submit"]');
+    if (!submitBtn) return;
+    
+    // Check if already submitting
+    if (submitBtn.disabled) return;
+    
+    // Disable button and show spinner
+    submitBtn.disabled = true;
+    const originalBtnHTML = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<span>Processing...</span> <i class="fa-solid fa-spinner fa-spin"></i>';
+    
     const receiver = document.getElementById('txReceiver').value.trim();
     const amount = document.getElementById('txAmount').value;
     const type = document.getElementById('txType').value;
@@ -571,6 +582,10 @@ function handleTransfer(e) {
     })
     .then(async res => {
         const data = await res.json();
+        
+        // Re-enable button on completion
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnHTML;
         
         // Case A: Low Risk Auto-Approved
         if (res.status === 200 && data.status === 'success') {
@@ -588,14 +603,14 @@ function handleTransfer(e) {
             sessionStorage.setItem('current_reasons', JSON.stringify(data.reasons));
             
             openMfaModal(data);
-        } 
+        }
         // Case C: Critical Risk Blocked
         else if (data.status === 'blocked') {
             showToast('Blocked Attempt', 'Suspected threat vector blocked.', 'error');
             showSuspiciousBlockedAlert(data);
             showDecisionTrace(0, data.level, data.score, data.reasons, false, false, false, "Blocked by Threat Model");
             loadDashboardData();
-        } 
+        }
         else if (data.status === 'pending_review') {
             showToast('Review Required', 'Transaction queued for manual administrator review.', 'warning');
             document.getElementById('transferForm').reset();
@@ -605,7 +620,12 @@ function handleTransfer(e) {
             showToast('Transfer Error', data.message || 'Error occurred.', 'error');
         }
     })
-    .catch(() => showToast('Network Error', 'Could not initiate transfer.', 'error'));
+    .catch((err) => {
+        // Re-enable button on failure
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnHTML;
+        showToast('Network Error', 'Could not initiate transfer.', 'error');
+    });
 }
 
 let otpExpiryInterval = null;

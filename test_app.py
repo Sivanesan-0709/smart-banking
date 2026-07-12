@@ -1,5 +1,6 @@
 import unittest
 import json
+import time
 import os
 import sqlite3
 from unittest.mock import patch
@@ -1127,6 +1128,103 @@ class BankAppTestCase(unittest.TestCase):
             challenges = cursor.fetchall()
             self.assertEqual(len(challenges), 1)
             conn.close()
+
+
+    def test_transfer_initiate_low_risk(self):
+        self.register_user('user_low', 'low@test.com', 'pass123', 'pass123', '08123456781', bal=10000.0)
+        self.register_user('rec_low', 'rec_low@test.com', 'pass123', 'pass123', '08123456782')
+        self.login_user('user_low', 'pass123')
+        
+        start = time.time()
+        res = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'rec_low',
+            'amount': '100',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        duration = time.time() - start
+        
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertLess(duration, 15.0)
+
+    def test_transfer_initiate_medium_risk(self):
+        self.register_user('user_med', 'med@test.com', 'pass123', 'pass123', '08123456783', bal=100000.0)
+        self.register_user('rec_med', 'rec_med@test.com', 'pass123', 'pass123', '08123456784')
+        self.login_user('user_med', 'pass123')
+        
+        start = time.time()
+        res = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'rec_med',
+            'amount': '15000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        duration = time.time() - start
+        
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertIn('otp', data['required'])
+        self.assertLess(duration, 15.0)
+
+    def test_transfer_initiate_high_risk_works(self):
+        self.register_user('user_high', 'high@test.com', 'pass123', 'pass123', '08123456785', bal=50000.0)
+        self.register_user('rec_high', 'rec_high@test.com', 'pass123', 'pass123', '08123456786')
+        
+        # Enroll face biometric first to pass high-risk requirement
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = 'user_high'")
+            uid = cursor.fetchone()['ID']
+            cursor.execute("INSERT INTO face_enrollments (user_id, template_reference) VALUES (?, ?)", (uid, json.dumps([0.1]*128)))
+            conn.commit()
+            conn.close()
+
+        self.login_user('user_high', 'pass123')
+        
+        start = time.time()
+        res = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'rec_high',
+            'amount': '45000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        duration = time.time() - start
+        
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertIn('otp', data['required'])
+        self.assertIn('face', data['required'])
+        self.assertLess(duration, 15.0)
+
+    def test_transfer_initiate_critical_review(self):
+        self.register_user('user_crit', 'crit@test.com', 'pass123', 'pass123', '08123456787', bal=120000.0)
+        self.register_user('rec_crit', 'rec_crit@test.com', 'pass123', 'pass123', '08123456788')
+        self.login_user('user_crit', 'pass123')
+        
+        start = time.time()
+        res = self.client.post('/api/transfer/initiate', data=json.dumps({
+            'receiver': 'rec_crit',
+            'amount': '110000',
+            'type': 'TRANSFER'
+        }), content_type='application/json')
+        duration = time.time() - start
+        
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'pending_review')
+        self.assertLess(duration, 15.0)
+
+    def test_frontend_duplicate_submission_prevention(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        js_path = os.path.join(base_dir, 'static', 'app.js')
+        with open(js_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        self.assertIn('submitBtn.disabled = true;', content)
+        self.assertIn('if (submitBtn.disabled) return;', content)
+        self.assertIn('submitBtn.disabled = false;', content)
 
 
 if __name__ == '__main__':
