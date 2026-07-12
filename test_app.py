@@ -1320,5 +1320,111 @@ class BankAppTestCase(unittest.TestCase):
             conn.close()
 
 
+
+    def test_add_money_workflow_low_risk(self):
+        # 1. Register and login
+        self.client.post('/api/register', json={
+            "username": "deposit_low", "firstname": "Dep", "lastname": "Low",
+            "email": "dep_low@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "deposit_low", "password": "pwd"})
+        
+        # 2. Initiate deposit (Low Risk, < 20,000)
+        res = self.client.post('/api/add-money/initiate', json={
+            "amount": 5000.0, "method": "UPI", "gateway": "Google Pay", "remarks": "Low risk top up"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertEqual(data['risk_level'], 'LOW')
+        
+        # 3. Check history
+        res_hist = self.client.get('/api/add-money/history')
+        self.assertEqual(res_hist.status_code, 200)
+        data_hist = json.loads(res_hist.data)
+        self.assertTrue(len(data_hist['history']) > 0)
+        self.assertEqual(data_hist['history'][0]['status'], 'APPROVED')
+
+        # 4. Check PDF Receipt
+        res_rec = self.client.get(f"/api/add-money/receipt/{data['reference_id']}")
+        self.assertEqual(res_rec.status_code, 200)
+        self.assertEqual(res_rec.headers['Content-Type'], 'application/pdf')
+
+    def test_add_money_workflow_medium_risk(self):
+        # 1. Register and login
+        self.client.post('/api/register', json={
+            "username": "deposit_med", "firstname": "Dep", "lastname": "Med",
+            "email": "dep_med@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "deposit_med", "password": "pwd"})
+        
+        # 2. Initiate deposit (Medium Risk, > 20,000)
+        res = self.client.post('/api/add-money/initiate', json={
+            "amount": 25000.0, "method": "UPI", "gateway": "Google Pay", "remarks": "Medium risk top up"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertEqual(data['risk_level'], 'MEDIUM')
+        self.assertTrue(data['otp_required'])
+        
+        # 3. Verify OTP
+        otp = self.captured_otps[-1]
+        res_verify = self.client.post('/api/transfer/verify', json={
+            "transaction_token": data['reference_id'],
+            "otp": otp
+        })
+        self.assertEqual(res_verify.status_code, 200)
+        
+        # 4. Check deposit status updated to APPROVED
+        res_hist = self.client.get('/api/add-money/history')
+        data_hist = json.loads(res_hist.data)
+        self.assertEqual(data_hist['history'][0]['status'], 'APPROVED')
+
+    def test_add_money_limits(self):
+        self.client.post('/api/register', json={
+            "username": "deposit_limits", "firstname": "Dep", "lastname": "Limits",
+            "email": "dep_lim@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "deposit_limits", "password": "pwd"})
+        
+        # Min limit
+        res_min = self.client.post('/api/add-money/initiate', json={
+            "amount": 50.0, "method": "UPI", "gateway": "Google Pay"
+        })
+        self.assertEqual(res_min.status_code, 400)
+        
+        # Max limit
+        res_max = self.client.post('/api/add-money/initiate', json={
+            "amount": 250000.0, "method": "UPI", "gateway": "Google Pay"
+        })
+        self.assertEqual(res_max.status_code, 400)
+
+    def test_add_money_deduplication(self):
+        self.client.post('/api/register', json={
+            "username": "deposit_dedup", "firstname": "Dep", "lastname": "Dedup",
+            "email": "dep_dedup@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "deposit_dedup", "password": "pwd"})
+        
+        # First request
+        res1 = self.client.post('/api/add-money/initiate', json={
+            "amount": 5000.0, "method": "UPI", "gateway": "Google Pay"
+        })
+        self.assertEqual(res1.status_code, 200)
+        
+        # Second identical request (within 10s)
+        res2 = self.client.post('/api/add-money/initiate', json={
+            "amount": 5000.0, "method": "UPI", "gateway": "Google Pay"
+        })
+        self.assertEqual(res2.status_code, 400)
+        data = json.loads(res2.data)
+        self.assertIn("Duplicate", data['message'])
+
+
 if __name__ == '__main__':
     unittest.main()

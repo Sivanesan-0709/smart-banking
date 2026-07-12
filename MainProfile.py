@@ -1,3 +1,4 @@
+from db_helper import get_db_connection
 # -*- coding: utf-8 -*-
 
 # Form implementation generated from reading ui file 'User_profile.ui'
@@ -110,10 +111,9 @@ class Ui_MainWindow(QWidget):
             self.setupUi(MainWindow)  # Replace with the actual function to show the dashboard
 
     def DeleteAcc(self):
-        import sqlite3
-        from PyQt5.QtWidgets import QMessageBox
+                from PyQt5.QtWidgets import QMessageBox
 
-        conn = sqlite3.connect("BankNH.db")
+        conn = get_db_connection()
         cur = conn.cursor()
 
         password, okPressed = QInputDialog.getText(self, "Delete Account", "Please Enter Your Password:",
@@ -164,15 +164,14 @@ class Ui_MainWindow(QWidget):
     # ...
 
     def CheckBal(self):
-        import sqlite3
-
+        
         # Get the password from the user
         password, okPressed = QInputDialog.getText(self, "Check Balance", "Please Enter Your Password:",
                                                    QtWidgets.QLineEdit.Password)
 
         # Check if the user pressed OK and entered a password
         if okPressed and password:
-            conn = sqlite3.connect('BankNH.db')
+            conn = get_db_connection()
             cur = conn.cursor()
 
             # Check if the entered password matches a record in the database

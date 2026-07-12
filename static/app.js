@@ -2,6 +2,7 @@
 
 // Global state
 let currentUser = null;
+let allTransactions = [];
 let socket = null;
 let liveRiskTimeout = null;
 let liveFeedData = [];
@@ -342,6 +343,7 @@ function loadDashboardData() {
                 document.getElementById('clientBlockedCount').innerText = blockedCount;
             }
         });
+    loadWalletAnalytics();
 }
 
 // Profile update
@@ -1818,4 +1820,274 @@ function handleReviewAction(token, action) {
         }
     })
     .catch(() => showToast('Network Error', 'Could not submit review decision.', 'error'));
+}
+
+
+// ==========================================
+// SMART WALLET - ADD MONEY FRONTEND WORKFLOWS
+// ==========================================
+
+let activeDepositRef = null;
+let currentMfaToken = null;
+
+function openAddMoneyModal() {
+    document.getElementById('addMoneySetup').classList.remove('hidden');
+    document.getElementById('addMoneySimulator').classList.add('hidden');
+    document.getElementById('addMoneySuccess').classList.add('hidden');
+    
+    document.getElementById('depositAmount').value = '';
+    document.getElementById('depositRemarks').value = '';
+    document.getElementById('depositMethod').value = 'UPI';
+    updateGatewayOptions();
+    
+    document.getElementById('addMoneyModal').classList.remove('hidden');
+}
+
+function closeAddMoneyModal() {
+    document.getElementById('addMoneyModal').classList.add('hidden');
+}
+
+function setDepositAmount(amt) {
+    document.getElementById('depositAmount').value = amt;
+}
+
+function quickAdd(amt) {
+    openAddMoneyModal();
+    setDepositAmount(amt);
+}
+
+function updateGatewayOptions() {
+    const method = document.getElementById('depositMethod').value;
+    const gatewaySelect = document.getElementById('depositGateway');
+    gatewaySelect.innerHTML = '';
+    
+    let options = [];
+    if (method === 'UPI') {
+        options = ['Google Pay', 'PhonePe', 'Paytm', 'BHIM'];
+    } else if (method === 'Debit Card' || method === 'Credit Card') {
+        options = ['Visa', 'MasterCard', 'RuPay'];
+    } else {
+        options = ['SBI Bank', 'HDFC Bank', 'ICICI Bank', 'Axis Bank'];
+    }
+    
+    options.forEach(opt => {
+        const el = document.createElement('option');
+        el.value = opt;
+        el.innerText = opt;
+        gatewaySelect.appendChild(el);
+    });
+}
+
+function startDepositVerification() {
+    const amount = parseFloat(document.getElementById('depositAmount').value);
+    const method = document.getElementById('depositMethod').value;
+    const gateway = document.getElementById('depositGateway').value;
+    const remarks = document.getElementById('depositRemarks').value.trim();
+    
+    if (isNaN(amount) || amount < 100 || amount > 200000) {
+        showToast('Invalid Amount', 'Transaction amount must be between ₹100 and ₹2,00,000.', 'error');
+        return;
+    }
+    
+    // Hide form, show simulator screen
+    document.getElementById('addMoneySetup').classList.add('hidden');
+    const simulator = document.getElementById('addMoneySimulator');
+    simulator.classList.remove('hidden');
+    
+    const statuses = ['Connecting...', 'Processing...', 'Verifying...', 'Payment Authorized'];
+    let statusIdx = 0;
+    document.getElementById('simulatorStatus').innerText = statuses[0];
+    
+    const interval = setInterval(() => {
+        statusIdx++;
+        if (statusIdx < statuses.length) {
+            document.getElementById('simulatorStatus').innerText = statuses[statusIdx];
+        } else {
+            clearInterval(interval);
+            // Submit to initiate API
+            submitDepositInitiate(amount, method, gateway, remarks);
+        }
+    }, 800);
+}
+
+function submitDepositInitiate(amount, method, gateway, remarks) {
+    fetch('/api/add-money/initiate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, method, gateway, remarks })
+    })
+    .then(async res => {
+        const data = await res.json();
+        document.getElementById('addMoneySimulator').classList.add('hidden');
+        
+        if (res.status === 200 && data.status === 'success') {
+            // Success view
+            activeDepositRef = data.reference_id;
+            document.getElementById('successDepositAmount').innerText = amount.toLocaleString('en-US', { minimumFractionDigits: 2 });
+            document.getElementById('successDepositRef').innerText = data.reference_id;
+            document.getElementById('successDepositGateway').innerText = gateway;
+            document.getElementById('successDepositMethod').innerText = method;
+            
+            // Reload user details & balance
+            loadDashboardData();
+            
+            // Update success balance
+            setTimeout(() => {
+                document.getElementById('successDepositBalance').innerText = currentUser.balance.toLocaleString('en-US', { minimumFractionDigits: 2 });
+            }, 500);
+            
+            document.getElementById('addMoneySuccess').classList.remove('hidden');
+            showToast('Deposit Complete', 'Money added to your Smart Wallet successfully!', 'success');
+        } 
+        else if (data.status === 'verification_required') {
+            // Trigger OTP or Biometric check
+            closeAddMoneyModal();
+            currentMfaToken = data.reference_id;
+            
+            if (data.face_required) {
+                showToast('MFA Required', 'Please complete OTP and Biometric verification.', 'warning');
+                openMfaModal(data.reference_id, true);
+            } else {
+                showToast('MFA Required', 'Please enter the verification code sent to your email.', 'warning');
+                openMfaModal(data.reference_id, false);
+            }
+        } 
+        else if (data.status === 'pending_review') {
+            closeAddMoneyModal();
+            showToast('Held for Review', 'Deposit held for administrative review due to CRITICAL security score.', 'warning');
+            loadDashboardData();
+        } 
+        else {
+            showToast('Deposit Failed', data.message || 'Payment initiation failed.', 'error');
+            openAddMoneyModal();
+        }
+    })
+    .catch(err => {
+        document.getElementById('addMoneySimulator').classList.add('hidden');
+        showToast('Connection Error', 'Failed to communicate with billing portal.', 'error');
+        openAddMoneyModal();
+    });
+}
+
+function downloadDepositReceipt() {
+    if (!activeDepositRef) return;
+    window.open(`/api/add-money/receipt/${activeDepositRef}`, '_blank');
+}
+
+function downloadDepositReceiptById(refId) {
+    window.open(`/api/add-money/receipt/${refId}`, '_blank');
+}
+
+function loadWalletAnalytics() {
+    fetch('/api/add-money/analytics')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                document.getElementById('walletBalance').innerText = currentUser.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                document.getElementById('walletToday').innerText = data.today.toLocaleString('en-US', { minimumFractionDigits: 2 });
+                document.getElementById('walletMonthly').innerText = data.monthly.toLocaleString('en-US', { minimumFractionDigits: 2 });
+                document.getElementById('walletLargest').innerText = data.largest.toLocaleString('en-US', { minimumFractionDigits: 2 });
+                document.getElementById('walletSuccessRate').innerText = data.success_rate.toFixed(1);
+            }
+        })
+        .catch(err => console.error("Failed to load wallet analytics", err));
+}
+
+function renderTransactions(txs) {
+    const list = document.getElementById('transactionsList');
+    list.innerHTML = '';
+    
+    if (txs.length === 0) {
+        list.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No matching transactions recorded.</td></tr>`;
+        return;
+    }
+    
+    txs.forEach(tx => {
+        const isDeposit = (tx.type === 'ADD_MONEY');
+        const isSender = (tx.sender === currentUser.username && !isDeposit);
+        const directionIcon = isDeposit ? '<i class="fa-solid fa-arrow-right-to-bracket text-success"></i>' : (isSender ? '<i class="fa-solid fa-arrow-right-from-bracket text-danger"></i>' : '<i class="fa-solid fa-arrow-right-to-bracket text-success"></i>');
+        const targetName = isDeposit ? 'Smart Wallet' : (isSender ? tx.receiver : tx.sender);
+        
+        let statusBadge = '';
+        if (tx.status === 'APPROVED' || tx.status === 'COMPLETED') {
+            statusBadge = `<span class="badge badge-success">Approved</span>`;
+        } else {
+            statusBadge = `<span class="badge badge-danger">Blocked</span>`;
+        }
+        
+        let traceObj = {};
+        try {
+            traceObj = JSON.parse(tx.decision_trace || '{}');
+        } catch(e) {}
+        const refId = traceObj.reference_id || `DEP-${tx.id}`;
+        
+        const receiptBtn = isDeposit ? `
+            <button class="btn btn-accent btn-sm" onclick="downloadDepositReceiptById('${refId}')" style="padding: 2px 6px; font-size: 0.72rem; border-radius: 4px; background: #10b981; border-color: #10b981;">
+                <i class="fa-solid fa-file-pdf"></i> Receipt
+            </button>
+        ` : '';
+        
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${formatDate(tx.timestamp)}</td>
+            <td>${tx.type}</td>
+            <td>${directionIcon} ${targetName}</td>
+            <td class="font-heading font-bold">${isSender ? '-' : '+'}₹${tx.amount.toLocaleString()}</td>
+            <td>${statusBadge}</td>
+            <td style="display: flex; gap: 4px;">
+                <button class="btn btn-outline btn-sm" onclick="openXaiTrace(${tx.id})" style="padding: 2px 6px; font-size: 0.72rem; border-radius: 4px;">
+                    <i class="fa-solid fa-brain"></i> Explain
+                </button>
+                ${receiptBtn}
+            </td>
+        `;
+        list.appendChild(row);
+    });
+}
+
+function filterTransactions() {
+    const query = document.getElementById('txSearchInput').value.toLowerCase().trim();
+    const typeFilter = document.getElementById('txTypeFilter').value;
+    
+    let filtered = allTransactions;
+    
+    if (typeFilter !== 'ALL') {
+        filtered = filtered.filter(tx => tx.type === typeFilter);
+    }
+    
+    if (query) {
+        filtered = filtered.filter(tx => {
+            const targetName = (tx.sender === currentUser.username) ? tx.receiver : tx.sender;
+            let traceObj = {};
+            try { traceObj = JSON.parse(tx.decision_trace || '{}'); } catch(e) {}
+            const refId = traceObj.reference_id || '';
+            
+            return targetName.toLowerCase().includes(query) || 
+                   tx.type.toLowerCase().includes(query) || 
+                   refId.toLowerCase().includes(query);
+        });
+    }
+    
+    renderTransactions(filtered);
+}
+
+function exportLedger(format) {
+    if (format === 'csv') {
+        let csv = 'Timestamp,Type,Sender/Receiver,Amount,Status,Reference\n';
+        allTransactions.forEach(tx => {
+            let traceObj = {};
+            try { traceObj = JSON.parse(tx.decision_trace || '{}'); } catch(e) {}
+            const refId = traceObj.reference_id || `DEP-${tx.id}`;
+            const targetName = (tx.sender === currentUser.username) ? tx.receiver : tx.sender;
+            csv += `"${formatDate(tx.timestamp)}","${tx.type}","${targetName}","${tx.amount}","${tx.status}","${refId}"\n`;
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.setAttribute('href', url);
+        a.setAttribute('download', 'Transaction_Ledger.csv');
+        a.click();
+    } else {
+        window.print();
+    }
 }

@@ -1,4 +1,4 @@
-import sqlite3
+from db_helper import get_db_connection
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QMessageBox
 db_filename = 'BankMT.db'
 
 # Create a connection to the database (this will also create the database file)
-conn = sqlite3.connect(db_filename)
+conn = get_db_connection()
 
 # Create a cursor to execute SQL commands
 cursor = conn.cursor()
@@ -153,8 +153,7 @@ class Ui_LoginWindow(object):
 
     def loginLogin(self):
         self.login.close()
-        import sqlite3
-        dbb = sqlite3.connect('BankNH.db')
+                dbb = get_db_connection()
         cur = dbb.cursor()
         username = self.lineEdit.text()
         password = self.lineEdit_2.text()

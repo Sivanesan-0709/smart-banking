@@ -1,11 +1,11 @@
+from db_helper import get_db_connection
 from PyQt5 import QtCore, QtGui, QtWidgets
 from MainLogin import Ui_LoginWindow
 from registrationNew import Ui_registrationPage
-import sqlite3
 
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('BankNH.db')
+        self.conn = get_db_connection()
         self.create_table()
 
     def create_table(self):

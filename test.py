@@ -1,3 +1,4 @@
+from db_helper import get_db_connection
 import sys
 from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox
 import sqlite3
@@ -41,7 +42,7 @@ def pipeline(df):
 def fetch_data_from_NEWt():
     try:
         # Connect to the BANKNH database
-        conn = sqlite3.connect("BANKNH.db")
+        conn = get_db_connection()
 
         # Create a cursor object to interact with the database
         cursor = conn.cursor()

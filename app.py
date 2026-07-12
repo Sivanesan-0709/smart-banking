@@ -2,7 +2,7 @@ from gevent import monkey
 monkey.patch_all()
 
 from flask import Flask, request, jsonify, session, send_from_directory
-import sqlite3
+from db_helper import get_db_connection, DB_PATH
 import joblib
 import pandas as pd
 import numpy as np
@@ -125,6 +125,62 @@ model = None
 face_detector = None
 face_recognizer = None
 
+
+
+def send_deposit_email(recipient_email, reference_id, amount, balance_before, balance_after):
+    smtp_host = os.environ.get('SMTP_HOST')
+    smtp_port = os.environ.get('SMTP_PORT')
+    smtp_username = os.environ.get('SMTP_USERNAME')
+    smtp_password = os.environ.get('SMTP_PASSWORD')
+    smtp_from = os.environ.get('SMTP_FROM_EMAIL', smtp_username)
+    smtp_use_tls = os.environ.get('SMTP_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+    
+    is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+    
+    if not smtp_host or not smtp_username or not smtp_password:
+        if is_test or is_dev:
+            return True
+        else:
+            raise RuntimeError("Mailing failed: SMTP environment variables are missing.")
+            
+    msg = EmailMessage()
+    msg['Subject'] = 'Money Added Successfully - Smart Wallet'
+    msg['From'] = smtp_from
+    msg['To'] = recipient_email
+    
+    body = f"""<h2>Smart Wallet - Deposit Confirmation</h2>
+<p>Dear Customer,</p>
+<p>We are pleased to inform you that <strong>INR {amount:,.2f}</strong> has been successfully added to your Smart Wallet.</p>
+<p><strong>Transaction Summary:</strong></p>
+<ul>
+    <li>Reference ID: <strong>{reference_id}</strong></li>
+    <li>Amount Added: <strong>INR {amount:,.2f}</strong></li>
+    <li>Balance Before: <strong>INR {balance_before:,.2f}</strong></li>
+    <li>Balance After: <strong>INR {balance_after:,.2f}</strong></li>
+    <li>Timestamp: <strong>{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</strong></li>
+</ul>
+<p>Thank you for banking with us!</p>
+"""
+    msg.set_content(body, subtype='html')
+    
+    try:
+        if smtp_use_tls:
+            server = smtplib.SMTP(smtp_host, int(smtp_port) if smtp_port else 587, timeout=5)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        else:
+            server = smtplib.SMTP_SSL(smtp_host, int(smtp_port) if smtp_port else 465, timeout=5)
+            server.ehlo()
+            
+        server.login(smtp_username, smtp_password)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to send deposit email: {e}", flush=True)
+        return False
 def load_ml_model():
     global model
     if os.path.exists(MODEL_PATH):
@@ -174,12 +230,6 @@ def load_face_models():
     else:
         print("Face ONNX models are missing and could not be downloaded.")
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def is_login_rate_limited(username):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -188,7 +238,7 @@ def is_login_rate_limited(username):
     conn.commit()
     
     # Check attempts in last 5 minutes
-    cursor.execute("SELECT COUNT(*) FROM login_attempts WHERE username = ? AND attempted_at >= datetime('now', '-5 minutes')", (username,))
+    cursor.execute("SELECT COUNT(*) FROM login_attempts WHERE username = %s AND attempted_at >= datetime('now', '-5 minutes')", (username,))
     count = cursor.fetchone()[0]
     conn.close()
     return count >= 5
@@ -196,14 +246,14 @@ def is_login_rate_limited(username):
 def record_login_attempt(username):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO login_attempts (username) VALUES (?)", (username,))
+    cursor.execute("INSERT INTO login_attempts (username) VALUES (%s)", (username,))
     conn.commit()
     conn.close()
 
 def clear_login_attempts(username):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM login_attempts WHERE username = ?", (username,))
+    cursor.execute("DELETE FROM login_attempts WHERE username = %s", (username,))
     conn.commit()
     conn.close()
 
@@ -211,190 +261,403 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Create cash_out_channels table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS cash_out_channels (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        status TEXT DEFAULT 'ACTIVE'
-    )
-    ''')
-    # Seed default cash out channels
-    cursor.execute("INSERT OR IGNORE INTO cash_out_channels (id, name, status) VALUES ('ATM_01', 'Main Branch ATM', 'ACTIVE')")
-    cursor.execute("INSERT OR IGNORE INTO cash_out_channels (id, name, status) VALUES ('AGENT_ALPHA', 'Mobile Agent Alpha', 'ACTIVE')")
-    cursor.execute("INSERT OR IGNORE INTO cash_out_channels (id, name, status) VALUES ('MERCHANT_WEST', 'Westside Merchant Partner', 'ACTIVE')")
+    db_url = os.environ.get('DATABASE_URL')
+    is_postgres = (db_url is not None or any(os.environ.get(var) for var in ['DB_HOST', 'DB_NAME', 'DB_USER']))
     
-    # Create login_attempts table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS login_attempts (
-        username TEXT NOT NULL,
-        attempted_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
+    if is_postgres:
+        print("[INFO] Migrating schema to PostgreSQL...", flush=True)
+        cursor.execute('''
+        CREATE OR REPLACE FUNCTION datetime(val text) RETURNS timestamp AS $$
+            SELECT CASE WHEN val = 'now' THEN CURRENT_TIMESTAMP::timestamp ELSE val::timestamp END;
+        $$ LANGUAGE SQL;
+        ''')
+        cursor.execute('''
+        CREATE OR REPLACE FUNCTION datetime(val text, modifier text) RETURNS timestamp AS $$
+            SELECT CASE 
+                WHEN val = 'now' THEN 
+                    CASE 
+                        WHEN modifier = '-5 minutes' THEN CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+                        WHEN modifier = '-15 minutes' THEN CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+                        WHEN modifier = '-10 minutes' THEN CURRENT_TIMESTAMP - INTERVAL '10 minutes'
+                        ELSE CURRENT_TIMESTAMP + modifier::interval
+                    END
+                ELSE val::timestamp + modifier::interval
+            END;
+        $$ LANGUAGE SQL;
+        ''')
+        cursor.execute('''
+        CREATE OR REPLACE FUNCTION strftime(format text, val text) RETURNS double precision AS $$
+            SELECT CASE 
+                WHEN format = '%s' THEN 
+                    CASE 
+                        WHEN val = 'now' THEN EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                        ELSE EXTRACT(EPOCH FROM val::timestamp)
+                    END
+                ELSE 0
+            END;
+        $$ LANGUAGE SQL;
+        ''')
+        cursor.execute('''
+        CREATE OR REPLACE FUNCTION strftime(format text, val timestamp) RETURNS double precision AS $$
+            SELECT CASE WHEN format = '%s' THEN EXTRACT(EPOCH FROM val) ELSE 0 END;
+        $$ LANGUAGE SQL;
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cash_out_channels (
+            id VARCHAR(50) PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            status VARCHAR(20) DEFAULT 'ACTIVE'
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            username VARCHAR(100) NOT NULL,
+            attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS NEWBANK (
+            ID SERIAL PRIMARY KEY,
+            USERNAME VARCHAR(100) UNIQUE NOT NULL,
+            FIRSTNAME VARCHAR(50) NOT NULL,
+            LASTNAME VARCHAR(50) NOT NULL,
+            EMAIL VARCHAR(150) NOT NULL,
+            PASSWORD VARCHAR(255) NOT NULL,
+            CONFIRM VARCHAR(255) NOT NULL,
+            PHONE VARCHAR(20) NOT NULL,
+            SEX VARCHAR(10),
+            ADDRESS TEXT NOT NULL,
+            BAL DOUBLE PRECISION DEFAULT 50000.0
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_transactions (
+            token VARCHAR(100) PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            receiver VARCHAR(100) NOT NULL,
+            amount DOUBLE PRECISION NOT NULL,
+            ttype VARCHAR(50) NOT NULL,
+            risk_score INTEGER NOT NULL,
+            risk_level VARCHAR(20) NOT NULL,
+            reasons TEXT NOT NULL,
+            is_fraud_predicted INTEGER NOT NULL,
+            otp_verified INTEGER DEFAULT 0,
+            face_verified INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            status VARCHAR(50) DEFAULT 'PENDING',
+            decision_trace TEXT NOT NULL
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transaction_otp_challenges (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            transaction_token VARCHAR(100) NOT NULL REFERENCES pending_transactions(token) ON DELETE CASCADE,
+            otp_hash VARCHAR(100) NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            attempts INTEGER DEFAULT 0,
+            max_attempts INTEGER DEFAULT 5,
+            resend_count INTEGER DEFAULT 0,
+            last_sent_at TIMESTAMP,
+            verified INTEGER DEFAULT 0,
+            verified_at TIMESTAMP,
+            consumed INTEGER DEFAULT 0,
+            consumed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS NEWT (
+            ID SERIAL PRIMARY KEY,
+            SENDER VARCHAR(100) NOT NULL,
+            RECEIVER VARCHAR(100) NOT NULL,
+            TTYPE VARCHAR(50) NOT NULL,
+            AMOUNT DOUBLE PRECISION NOT NULL,
+            SENDEROLDBAL DOUBLE PRECISION NOT NULL,
+            SENDERNEWBAL DOUBLE PRECISION NOT NULL,
+            RECOLDBAL DOUBLE PRECISION NOT NULL,
+            RECNEWBAL DOUBLE PRECISION NOT NULL,
+            STATUS VARCHAR(50) DEFAULT 'APPROVED',
+            TIMESTAMP TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            IS_FRAUD_PREDICTED INTEGER DEFAULT 0,
+            DECISION_TRACE TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_enrollments (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL UNIQUE REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            template_reference TEXT NOT NULL,
+            model_name VARCHAR(50) DEFAULT 'SFace',
+            model_version VARCHAR(20) DEFAULT '1.0',
+            enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(20) DEFAULT 'ACTIVE'
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_verification_attempts (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            transaction_id INTEGER,
+            verification_result VARCHAR(50) NOT NULL,
+            similarity_or_distance DOUBLE PRECISION,
+            threshold DOUBLE PRECISION,
+            liveness_result VARCHAR(50),
+            challenge_type VARCHAR(50),
+            attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            model_version VARCHAR(20)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS biometric_security_events (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            transaction_id INTEGER,
+            event_type VARCHAR(100) NOT NULL,
+            severity VARCHAR(20) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            metadata TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deposits (
+            id SERIAL PRIMARY KEY,
+            reference_id VARCHAR(100) UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            amount DOUBLE PRECISION NOT NULL,
+            method VARCHAR(50) NOT NULL,
+            gateway VARCHAR(50) NOT NULL,
+            status VARCHAR(50) NOT NULL,
+            risk_score INTEGER NOT NULL,
+            risk_level VARCHAR(20) NOT NULL,
+            remarks TEXT,
+            balance_before DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            balance_after DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            ip_address VARCHAR(50),
+            device TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+    else:
+        print("[INFO] Migrating schema to SQLite...", flush=True)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cash_out_channels (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            status TEXT DEFAULT 'ACTIVE'
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            username TEXT NOT NULL,
+            attempted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS NEWBANK (
+            ID INTEGER PRIMARY KEY AUTOINCREMENT,
+            USERNAME TEXT UNIQUE NOT NULL,
+            FIRSTNAME TEXT NOT NULL,
+            LASTNAME TEXT NOT NULL,
+            EMAIL TEXT NOT NULL,
+            PASSWORD TEXT NOT NULL,
+            CONFIRM TEXT NOT NULL,
+            PHONE TEXT NOT NULL,
+            SEX TEXT,
+            ADDRESS TEXT NOT NULL,
+            BAL REAL DEFAULT 50000.0
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_transactions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            receiver TEXT NOT NULL,
+            amount REAL NOT NULL,
+            ttype TEXT NOT NULL,
+            risk_score INTEGER NOT NULL,
+            risk_level TEXT NOT NULL,
+            reasons TEXT NOT NULL,
+            is_fraud_predicted INTEGER NOT NULL,
+            otp_verified INTEGER DEFAULT 0,
+            face_verified INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME NOT NULL,
+            status TEXT DEFAULT 'PENDING',
+            decision_trace TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transaction_otp_challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            transaction_token TEXT NOT NULL,
+            otp_hash TEXT NOT NULL,
+            expires_at DATETIME NOT NULL,
+            attempts INTEGER DEFAULT 0,
+            max_attempts INTEGER DEFAULT 5,
+            resend_count INTEGER DEFAULT 0,
+            last_sent_at DATETIME,
+            verified INTEGER DEFAULT 0,
+            verified_at DATETIME,
+            consumed INTEGER DEFAULT 0,
+            consumed_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(transaction_token) REFERENCES pending_transactions(token)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS NEWT (
+            ID INTEGER PRIMARY KEY AUTOINCREMENT,
+            SENDER TEXT NOT NULL,
+            RECEIVER TEXT NOT NULL,
+            TTYPE TEXT NOT NULL,
+            AMOUNT REAL NOT NULL,
+            SENDEROLDBAL REAL NOT NULL,
+            SENDERNEWBAL REAL NOT NULL,
+            RECOLDBAL REAL NOT NULL,
+            RECNEWBAL REAL NOT NULL,
+            STATUS TEXT DEFAULT 'APPROVED',
+            TIMESTAMP DATETIME DEFAULT CURRENT_TIMESTAMP,
+            IS_FRAUD_PREDICTED INTEGER DEFAULT 0,
+            DECISION_TRACE TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_enrollments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            template_reference TEXT NOT NULL,
+            model_name TEXT DEFAULT 'SFace',
+            model_version TEXT DEFAULT '1.0',
+            enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'ACTIVE',
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_verification_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            transaction_id INTEGER,
+            verification_result TEXT NOT NULL,
+            similarity_or_distance REAL,
+            threshold REAL,
+            liveness_result TEXT,
+            challenge_type TEXT,
+            attempted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            model_version TEXT,
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS biometric_security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            transaction_id INTEGER,
+            event_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            metadata TEXT,
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deposits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference_id TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            method TEXT NOT NULL,
+            gateway TEXT NOT NULL,
+            status TEXT NOT NULL,
+            risk_score INTEGER NOT NULL,
+            risk_level TEXT NOT NULL,
+            remarks TEXT,
+            balance_before REAL NOT NULL DEFAULT 0.0,
+            balance_after REAL NOT NULL DEFAULT 0.0,
+            ip_address TEXT,
+            device TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+
+    cursor.execute("INSERT INTO cash_out_channels (id, name, status) VALUES ('ATM_01', 'Main Branch ATM', 'ACTIVE') ON CONFLICT DO NOTHING")
+    cursor.execute("INSERT INTO cash_out_channels (id, name, status) VALUES ('AGENT_ALPHA', 'Mobile Agent Alpha', 'ACTIVE') ON CONFLICT DO NOTHING")
+    cursor.execute("INSERT INTO cash_out_channels (id, name, status) VALUES ('MERCHANT_WEST', 'Westside Merchant Partner', 'ACTIVE') ON CONFLICT DO NOTHING")
     
-    # Create NEWBANK if not exists
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS NEWBANK (
-        ID INTEGER PRIMARY KEY AUTOINCREMENT,
-        USERNAME TEXT UNIQUE NOT NULL,
-        FIRSTNAME TEXT NOT NULL,
-        LASTNAME TEXT NOT NULL,
-        EMAIL TEXT NOT NULL,
-        PASSWORD TEXT NOT NULL,
-        CONFIRM TEXT NOT NULL,
-        PHONE TEXT NOT NULL,
-        SEX TEXT,
-        ADDRESS TEXT NOT NULL,
-        BAL REAL DEFAULT 50000.0
-    )
-    ''')
-
-    # Create pending_transactions if not exists
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS pending_transactions (
-        token TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        receiver TEXT NOT NULL,
-        amount REAL NOT NULL,
-        ttype TEXT NOT NULL,
-        risk_score INTEGER NOT NULL,
-        risk_level TEXT NOT NULL,
-        reasons TEXT NOT NULL,
-        is_fraud_predicted INTEGER NOT NULL,
-        otp_verified INTEGER DEFAULT 0,
-        face_verified INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        expires_at DATETIME NOT NULL,
-        status TEXT DEFAULT 'PENDING',
-        decision_trace TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
-    )
-    ''')
-
-    # Create transaction_otp_challenges if not exists
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS transaction_otp_challenges (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        transaction_token TEXT NOT NULL,
-        otp_hash TEXT NOT NULL,
-        expires_at DATETIME NOT NULL,
-        attempts INTEGER DEFAULT 0,
-        max_attempts INTEGER DEFAULT 5,
-        resend_count INTEGER DEFAULT 0,
-        last_sent_at DATETIME,
-        verified INTEGER DEFAULT 0,
-        verified_at DATETIME,
-        consumed INTEGER DEFAULT 0,
-        consumed_at DATETIME,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(transaction_token) REFERENCES pending_transactions(token)
-    )
-    ''')
-
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_otp_token ON transaction_otp_challenges(transaction_token)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_transactions(token)")
-
-    
-    # Create NEWT if not exists
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS NEWT (
-        ID INTEGER PRIMARY KEY AUTOINCREMENT,
-        SENDER TEXT NOT NULL,
-        RECEIVER TEXT NOT NULL,
-        TTYPE TEXT NOT NULL,
-        AMOUNT REAL NOT NULL,
-        SENDEROLDBAL REAL NOT NULL,
-        SENDERNEWBAL REAL NOT NULL,
-        RECOLDBAL REAL NOT NULL,
-        RECNEWBAL REAL NOT NULL,
-        STATUS TEXT DEFAULT 'APPROVED',
-        TIMESTAMP DATETIME DEFAULT CURRENT_TIMESTAMP,
-        IS_FRAUD_PREDICTED INTEGER DEFAULT 0,
-        DECISION_TRACE TEXT
-    )
-    ''')
-    try:
-        cursor.execute("ALTER TABLE NEWT ADD COLUMN DECISION_TRACE TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
-
-    # Create Biometric Enrollment Reference
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS face_enrollments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL UNIQUE,
-        template_reference TEXT NOT NULL, -- 128-float embedding JSON
-        model_name TEXT DEFAULT 'SFace',
-        model_version TEXT DEFAULT '1.0',
-        enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        status TEXT DEFAULT 'ACTIVE',
-        FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
-    )
-    ''')
-
-    # Create Biometric Verification Attempts
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS face_verification_attempts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        transaction_id INTEGER,
-        verification_result TEXT NOT NULL, -- 'SUCCESS', 'MISMATCH', 'LIVENESS_FAILED', 'ERROR'
-        similarity_or_distance REAL,
-        threshold REAL,
-        liveness_result TEXT,
-        challenge_type TEXT,
-        attempted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        model_version TEXT,
-        FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
-    )
-    ''')
-
-    # Create Biometric Security Event logs
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS biometric_security_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        transaction_id INTEGER,
-        event_type TEXT NOT NULL, -- 'FACE_MISMATCH', 'LIVENESS_FAILURE', 'REPEATED_FAILURES', 'ENROLLMENT_DELETED'
-        severity TEXT NOT NULL, -- 'LOW', 'MEDIUM', 'HIGH'
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        metadata TEXT,
-        FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
-    )
-    ''')
-    
-    # Verify if columns exist in NEWT (for backward compatibility / migration)
-    cursor.execute("PRAGMA table_info(NEWT)")
-    columns = [col['name'] for col in cursor.fetchall()]
-    
+    if is_postgres:
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'newt'")
+        columns = [row[0].upper() for row in cursor.fetchall()]
+    else:
+        cursor.execute("PRAGMA table_info(NEWT)")
+        columns = [col['name'].upper() for col in cursor.fetchall()]
+        
     if 'STATUS' not in columns:
-        cursor.execute("ALTER TABLE NEWT ADD COLUMN STATUS TEXT DEFAULT 'APPROVED'")
+        cursor.execute("ALTER TABLE NEWT ADD COLUMN STATUS VARCHAR(50) DEFAULT 'APPROVED'")
     if 'TIMESTAMP' not in columns:
-        cursor.execute("ALTER TABLE NEWT ADD COLUMN TIMESTAMP DATETIME DEFAULT '2026-07-02 00:00:00'")
+        if is_postgres:
+            cursor.execute("ALTER TABLE NEWT ADD COLUMN TIMESTAMP TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        else:
+            cursor.execute("ALTER TABLE NEWT ADD COLUMN TIMESTAMP DATETIME DEFAULT '2026-07-02 00:00:00'")
     if 'IS_FRAUD_PREDICTED' not in columns:
         cursor.execute("ALTER TABLE NEWT ADD COLUMN IS_FRAUD_PREDICTED INTEGER DEFAULT 0")
+    if 'DECISION_TRACE' not in columns:
+        cursor.execute("ALTER TABLE NEWT ADD COLUMN DECISION_TRACE TEXT")
         
-    # Index migrations (run after all tables are created)
-    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_newbank_username ON NEWBANK(USERNAME)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_timestamp ON NEWT(TIMESTAMP)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_sender ON NEWT(SENDER)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_receiver ON NEWT(RECEIVER)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_status ON NEWT(STATUS)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_face_attempts_user ON face_verification_attempts(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username)")
-    
+    if is_postgres:
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_newbank_username ON NEWBANK(USERNAME)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_timestamp ON NEWT(TIMESTAMP)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_deposits_reference ON deposits(reference_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_sender ON NEWT(SENDER)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_receiver ON NEWT(RECEIVER)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_status ON NEWT(STATUS)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_face_attempts_user ON face_verification_attempts(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username)")
+    else:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_otp_token ON transaction_otp_challenges(transaction_token)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_transactions(token)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_newbank_username ON NEWBANK(USERNAME)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_deposits_reference ON deposits(reference_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_timestamp ON NEWT(TIMESTAMP)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_deposits_reference ON deposits(reference_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_sender ON NEWT(SENDER)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_receiver ON NEWT(RECEIVER)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_status ON NEWT(STATUS)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_face_attempts_user ON face_verification_attempts(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username)")
+        
     conn.commit()
     conn.close()
-
-# Initialize databases and models on startup
-init_db()
-load_ml_model()
-load_face_models()
-
-# --- Helper Biometric Utils ---
+    print("[INFO] Schema initialization and migrations completed successfully.", flush=True)
 def decode_base64_image(base64_str):
     try:
         if ',' in base64_str:
@@ -545,7 +808,7 @@ def register():
         cursor = conn.cursor()
         
         # Check if username exists
-        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = ?", (username,))
+        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = %s", (username,))
         if cursor.fetchone():
             conn.close()
             return jsonify({"status": "error", "message": "Username already exists."}), 400
@@ -553,7 +816,7 @@ def register():
         hashed_pw = generate_password_hash(password)
         cursor.execute('''
         INSERT INTO NEWBANK (USERNAME, FIRSTNAME, LASTNAME, EMAIL, PASSWORD, CONFIRM, PHONE, SEX, ADDRESS, BAL)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (username, firstname, lastname, email, hashed_pw, "", phone, sex, address, initial_bal))
         
         conn.commit()
@@ -578,7 +841,7 @@ def login():
             
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = ?", (username,))
+        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = %s", (username,))
         user = cursor.fetchone()
         
         if user:
@@ -600,7 +863,7 @@ def login():
             if pw_ok:
                 if legacy:
                     hashed = generate_password_hash(password)
-                    cursor.execute("UPDATE NEWBANK SET PASSWORD = ? WHERE ID = ?", (hashed, user['ID']))
+                    cursor.execute("UPDATE NEWBANK SET PASSWORD = %s WHERE ID = %s", (hashed, user['ID']))
                     conn.commit()
                 
                 clear_login_attempts(username)
@@ -647,7 +910,7 @@ def profile():
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = ?", (session['username'],))
+    cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = %s", (session['username'],))
     user = cursor.fetchone()
     conn.close()
     
@@ -690,8 +953,8 @@ def update_profile():
         cursor = conn.cursor()
         cursor.execute('''
         UPDATE NEWBANK 
-        SET FIRSTNAME = ?, LASTNAME = ?, EMAIL = ?, PHONE = ?, SEX = ?, ADDRESS = ? 
-        WHERE USERNAME = ?
+        SET FIRSTNAME = %s, LASTNAME = %s, EMAIL = %s, PHONE = %s, SEX = %s, ADDRESS = %s 
+        WHERE USERNAME = %s
         ''', (firstname, lastname, email, phone, sex, address, session['username']))
         conn.commit()
         conn.close()
@@ -711,12 +974,12 @@ def delete_account():
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = ? AND PASSWORD = ?", (session['username'], password))
+        cursor.execute("SELECT * FROM NEWBANK WHERE USERNAME = %s AND PASSWORD = %s", (session['username'], password))
         user = cursor.fetchone()
         
         if user:
-            cursor.execute("DELETE FROM NEWBANK WHERE USERNAME = ?", (session['username'],))
-            cursor.execute("DELETE FROM face_enrollments WHERE user_id = ?", (user['ID'],))
+            cursor.execute("DELETE FROM NEWBANK WHERE USERNAME = %s", (session['username'],))
+            cursor.execute("DELETE FROM face_enrollments WHERE user_id = %s", (user['ID'],))
             conn.commit()
             conn.close()
             session.clear()
@@ -738,11 +1001,11 @@ def biometric_status():
     cursor = conn.cursor()
     
     user_id = session['user_id']
-    cursor.execute("SELECT enrolled_at, status FROM face_enrollments WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT enrolled_at, status FROM face_enrollments WHERE user_id = %s", (user_id,))
     enrollment = cursor.fetchone()
     
     # Query failed verification attempts
-    cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = ? AND verification_result != 'SUCCESS'", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result != 'SUCCESS'", (user_id,))
     failed_attempts = cursor.fetchone()[0]
     
     conn.close()
@@ -795,13 +1058,14 @@ def biometric_enroll():
         user_id = session['user_id']
         
         cursor.execute('''
-        INSERT OR REPLACE INTO face_enrollments (user_id, template_reference, model_name, model_version, status, enrolled_at)
-        VALUES (?, ?, 'SFace', '1.0', 'ACTIVE', CURRENT_TIMESTAMP)
+        INSERT INTO face_enrollments (user_id, template_reference, model_name, model_version, status, enrolled_at)
+        VALUES (%s, %s, 'SFace', '1.0', 'ACTIVE', CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id) DO UPDATE SET template_reference = EXCLUDED.template_reference, updated_at = CURRENT_TIMESTAMP
         ''', (user_id, json.dumps(avg_embedding)))
         
         cursor.execute('''
         INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-        VALUES (?, 'ENROLLMENT_CREATED', 'LOW', 'User created new Face template')
+        VALUES (%s, 'ENROLLMENT_CREATED', 'LOW', 'User created new Face template')
         ''', (user_id,))
         
         conn.commit()
@@ -830,11 +1094,11 @@ def biometric_delete():
         cursor = conn.cursor()
         user_id = session['user_id']
         
-        cursor.execute("DELETE FROM face_enrollments WHERE user_id = ?", (user_id,))
+        cursor.execute("DELETE FROM face_enrollments WHERE user_id = %s", (user_id,))
         
         cursor.execute('''
         INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-        VALUES (?, 'ENROLLMENT_DELETED', 'MEDIUM', 'User revoked/purged biometric data profile')
+        VALUES (%s, 'ENROLLMENT_DELETED', 'MEDIUM', 'User revoked/purged biometric data profile')
         ''', (user_id,))
         
         conn.commit()
@@ -883,7 +1147,7 @@ def biometric_verify_check():
             cursor = conn.cursor()
             cursor.execute('''
             INSERT INTO face_verification_attempts (user_id, verification_result, liveness_result, challenge_type, model_version)
-            VALUES (?, 'ERROR', ?, ?, '1.0')
+            VALUES (%s, 'ERROR', %s, %s, '1.0')
             ''', (user_id, q_check['message'], challenge))
             conn.commit()
             conn.close()
@@ -898,12 +1162,12 @@ def biometric_verify_check():
             cursor = conn.cursor()
             cursor.execute('''
             INSERT INTO face_verification_attempts (user_id, verification_result, liveness_result, challenge_type, model_version)
-            VALUES (?, 'LIVENESS_FAILED', 'Failed head turn', ?, '1.0')
+            VALUES (%s, 'LIVENESS_FAILED', 'Failed head turn', %s, '1.0')
             ''', (user_id, challenge))
             
             cursor.execute('''
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-            VALUES (?, 'LIVENESS_FAILURE', 'MEDIUM', ?)
+            VALUES (%s, 'LIVENESS_FAILURE', 'MEDIUM', %s)
             ''', (user_id, f"Failed challenge: {challenge}"))
             
             conn.commit()
@@ -918,7 +1182,7 @@ def biometric_verify_check():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT template_reference FROM face_enrollments WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT template_reference FROM face_enrollments WHERE user_id = %s", (user_id,))
         row = cursor.fetchone()
         
         if not row:
@@ -937,23 +1201,23 @@ def biometric_verify_check():
         result_str = 'SUCCESS' if is_match else 'MISMATCH'
         cursor.execute('''
         INSERT INTO face_verification_attempts (user_id, verification_result, similarity_or_distance, threshold, liveness_result, challenge_type, model_version)
-        VALUES (?, ?, ?, ?, 'PASSED', ?, '1.0')
+        VALUES (%s, %s, %s, %s, 'PASSED', %s, '1.0')
         ''', (user_id, result_str, similarity, threshold, challenge))
         
         if is_match:
             # Mark biometrics verified in the pending transfer transaction if exists
             token = session.get('mfa_pending_token')
             if token:
-                cursor.execute("UPDATE pending_transactions SET face_verified = 1 WHERE token = ?", (token,))
+                cursor.execute("UPDATE pending_transactions SET face_verified = 1 WHERE token = %s", (token,))
                 
-            cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = ? AND verification_result = 'SUCCESS'", (user_id,))
+            cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result = 'SUCCESS'", (user_id,))
             attempts_row = cursor.fetchone()
             
             # Auto-finalize transaction if OTP was already verified
             token = session.get('mfa_pending_token')
             otp_already_verified = False
             if token:
-                cursor.execute("SELECT otp_verified FROM pending_transactions WHERE token = ?", (token,))
+                cursor.execute("SELECT otp_verified FROM pending_transactions WHERE token = %s", (token,))
                 ptx = cursor.fetchone()
                 if ptx and ptx['otp_verified']:
                     otp_already_verified = True
@@ -973,7 +1237,7 @@ def biometric_verify_check():
             # Log security event
             cursor.execute('''
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-            VALUES (?, 'FACE_MISMATCH', 'HIGH', ?)
+            VALUES (%s, 'FACE_MISMATCH', 'HIGH', %s)
             ''', (user_id, f"Similarity: {similarity:.4f} below threshold: {threshold:.4f}"))
             
             conn.commit()
@@ -1027,7 +1291,7 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
     # Check if empty account pattern: amount is > 85% of sender's balance
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (sender_username,))
+    cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (sender_username,))
     sender_bal_row = cursor.fetchone()
     sender_bal = sender_bal_row['BAL'] if sender_bal_row else 0.0
     
@@ -1038,7 +1302,7 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
         reasons.append("Account Emptying Anomaly (Transferring >85% of liquid balance)")
         
     # Check if beneficiary is a new recipient
-    cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = ? AND RECEIVER = ? AND STATUS = 'APPROVED'", (sender_username, receiver))
+    cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND RECEIVER = %s AND STATUS = 'APPROVED'", (sender_username, receiver))
     recipient_history = cursor.fetchone()[0]
     new_recipient_points = 0
     if recipient_history == 0:
@@ -1051,7 +1315,7 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
     ml_model_points = 0
     ml_probability = 0.0
     if model is not None:
-        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
         receiver_bal_row = cursor.fetchone()
         receiver_bal = receiver_bal_row['BAL'] if receiver_bal_row else 0.0
         
@@ -1079,7 +1343,7 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
             pass
             
     # 3. Behavior Velocity: Transaction count inside 5 minutes
-    cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = ? AND TIMESTAMP >= datetime('now', '-5 minutes')", (sender_username,))
+    cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND TIMESTAMP >= datetime('now', '-5 minutes')", (sender_username,))
     recent_transfers = cursor.fetchone()[0]
     velocity_points = 0
     if recent_transfers >= 3:
@@ -1092,7 +1356,7 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
         reasons.append("Rapid Velocity: Multiple transfers in last 5 minutes")
         
     # 4. Biometric signals: Failures in last 15 minutes
-    cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = ? AND verification_result != 'SUCCESS' AND attempted_at >= datetime('now', '-15 minutes')", (sender_id,))
+    cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result != 'SUCCESS' AND attempted_at >= datetime('now', '-15 minutes')", (sender_id,))
     recent_biometric_fails = cursor.fetchone()[0]
     biometric_points = 0
     if recent_biometric_fails > 0:
@@ -1185,7 +1449,7 @@ def transfer_initiate():
         # Check receiver exists based on transaction type
         t_rec = time.time()
         if ttype == 'TRANSFER':
-            cursor.execute("SELECT ID, BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+            cursor.execute("SELECT ID, BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
             receiver_row = cursor.fetchone()
             if not receiver_row:
                 conn.close()
@@ -1198,7 +1462,7 @@ def transfer_initiate():
                 print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
                 return jsonify({"status": "error", "message": "Cannot transfer to yourself."}), 400
         else: # CASH_OUT
-            cursor.execute("SELECT * FROM cash_out_channels WHERE id = ? AND status = 'ACTIVE'", (receiver,))
+            cursor.execute("SELECT * FROM cash_out_channels WHERE id = %s AND status = 'ACTIVE'", (receiver,))
             channel_row = cursor.fetchone()
             if not channel_row:
                 conn.close()
@@ -1215,7 +1479,7 @@ def transfer_initiate():
 
         # Get sender details
         t_bal = time.time()
-        cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE USERNAME = ?", (sender,))
+        cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE USERNAME = %s", (sender,))
         sender_row = cursor.fetchone()
         sender_balance = sender_row['BAL']
         sender_email = sender_row['EMAIL']
@@ -1273,7 +1537,7 @@ def transfer_initiate():
             decision_trace['auth_required'] = ['admin_review']
 
         # Check if user has biometric face profile enrolled
-        cursor.execute("SELECT id FROM face_enrollments WHERE user_id = ?", (sender_id,))
+        cursor.execute("SELECT id FROM face_enrollments WHERE user_id = %s", (sender_id,))
         has_face_enrolled = (cursor.fetchone() is not None)
 
         # Enforce enrollment requirement for HIGH risk
@@ -1295,7 +1559,7 @@ def transfer_initiate():
             print(f"[DEBUG] [Step 12: Pending transaction creation started (LOW)]", flush=True)
             cursor.execute('''
             INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, otp_verified, face_verified, expires_at, decision_trace)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1, %s, %s)
             ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
             
             t_commit = time.time()
@@ -1314,15 +1578,16 @@ def transfer_initiate():
             print(f"[DEBUG] [Step 12: Pending transaction creation started (CRITICAL)]", flush=True)
             cursor.execute('''
             INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, status, decision_trace)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_REVIEW', ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING_REVIEW', %s)
             ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
 
             cursor.execute('''
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-            VALUES (?, 'TRANSACTION_HELD_FOR_REVIEW', 'HIGH', ?)
+            VALUES (%s, 'TRANSACTION_HELD_FOR_REVIEW', 'HIGH', %s)
+            RETURNING ID
             ''', (sender_id, f"Transaction {amount} to {receiver} held for admin review due to CRITICAL risk score {risk_score}."))
 
-            tx_id = cursor.lastrowid
+            tx_id = cursor.fetchone()[0]
             
             t_commit = time.time()
             conn.commit()
@@ -1364,13 +1629,13 @@ def transfer_initiate():
         print(f"[DEBUG] [Step 12: Pending transaction creation started ({risk_level})]", flush=True)
         cursor.execute('''
         INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, decision_trace)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
 
         t_challenge = time.time()
         cursor.execute('''
         INSERT INTO transaction_otp_challenges (user_id, transaction_token, otp_hash, expires_at, last_sent_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
+        VALUES (%s, %s, %s, %s, datetime('now'))
         ''', (sender_id, token, otp_hashed, expires_at))
         print(f"[DEBUG] [Step 8: OTP database insert completed] took {time.time() - t_challenge:.4f}s", flush=True)
         
@@ -1394,8 +1659,8 @@ def transfer_initiate():
             t_rollback = time.time()
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = ?", (token,))
-            cursor.execute("DELETE FROM pending_transactions WHERE token = ?", (token,))
+            cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = %s", (token,))
+            cursor.execute("DELETE FROM pending_transactions WHERE token = %s", (token,))
             conn.commit()
             conn.close()
             print(f"[DEBUG] [Database rollback cleanup completed] took {time.time() - t_rollback:.4f}s", flush=True)
@@ -1468,7 +1733,7 @@ def transfer_verify():
         
         cursor.execute('''
         SELECT * FROM transaction_otp_challenges 
-        WHERE transaction_token = ? AND user_id = ?
+        WHERE transaction_token = %s AND user_id = %s
         ''', (token, user_id))
         challenge = cursor.fetchone()
         
@@ -1491,8 +1756,8 @@ def transfer_verify():
             new_attempts = challenge['attempts'] + 1
             cursor.execute('''
             UPDATE transaction_otp_challenges 
-            SET attempts = ? 
-            WHERE id = ?
+            SET attempts = %s 
+            WHERE id = %s
             ''', (new_attempts, challenge['id']))
             conn.commit()
             
@@ -1506,16 +1771,16 @@ def transfer_verify():
         cursor.execute('''
         UPDATE transaction_otp_challenges 
         SET verified = 1, verified_at = datetime('now') 
-        WHERE id = ?
+        WHERE id = %s
         ''', (challenge['id'],))
         
         cursor.execute('''
         UPDATE pending_transactions 
         SET otp_verified = 1 
-        WHERE token = ?
+        WHERE token = %s
         ''', (token,))
         
-        cursor.execute("SELECT risk_level FROM pending_transactions WHERE token = ?", (token,))
+        cursor.execute("SELECT risk_level FROM pending_transactions WHERE token = %s", (token,))
         pending_row = cursor.fetchone()
         
         conn.commit()
@@ -1554,7 +1819,7 @@ def otp_resend():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = ?", (user_id,))
+        cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = %s", (user_id,))
         email_row = cursor.fetchone()
         email = email_row['EMAIL'] if email_row else None
         if not email:
@@ -1563,7 +1828,7 @@ def otp_resend():
         
         cursor.execute('''
         SELECT * FROM transaction_otp_challenges 
-        WHERE transaction_token = ? AND user_id = ?
+        WHERE transaction_token = %s AND user_id = %s
         ''', (token, user_id))
         challenge = cursor.fetchone()
         
@@ -1583,7 +1848,7 @@ def otp_resend():
         if last_sent_str:
             try:
                 cursor.execute('''
-                SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS diff
+                SELECT (strftime('%s', 'now') - strftime('%s', %s)) AS diff
                 ''', (last_sent_str,))
                 diff_row = cursor.fetchone()
                 diff = diff_row['diff'] if diff_row else 999
@@ -1600,18 +1865,18 @@ def otp_resend():
         
         cursor.execute('''
         UPDATE transaction_otp_challenges 
-        SET otp_hash = ?, expires_at = ?, last_sent_at = datetime('now'), resend_count = resend_count + 1, attempts = 0
-        WHERE id = ?
+        SET otp_hash = %s, expires_at = %s, last_sent_at = datetime('now'), resend_count = resend_count + 1, attempts = 0
+        WHERE id = %s
         ''', (otp_hashed, expires_at, challenge['id']))
         
         cursor.execute('''
         UPDATE pending_transactions 
-        SET expires_at = ? 
-        WHERE token = ?
+        SET expires_at = %s 
+        WHERE token = %s
         ''', (expires_at, token))
         
             
-        cursor.execute("SELECT amount, receiver FROM pending_transactions WHERE token = ?", (token,))
+        cursor.execute("SELECT amount, receiver FROM pending_transactions WHERE token = %s", (token,))
         pending_tx = cursor.fetchone()
         
         conn.commit()
@@ -1639,7 +1904,7 @@ def finalize_pending_transaction(token):
         cursor = conn.cursor()
         cursor.execute("BEGIN TRANSACTION")
         
-        cursor.execute("SELECT * FROM pending_transactions WHERE token = ?", (token,))
+        cursor.execute("SELECT * FROM pending_transactions WHERE token = %s", (token,))
         pending = cursor.fetchone()
         
         if not pending:
@@ -1676,38 +1941,44 @@ def finalize_pending_transaction(token):
         ttype = pending['ttype']
         is_fraud_predicted = pending['is_fraud_predicted']
         
-        cursor.execute("SELECT USERNAME, BAL FROM NEWBANK WHERE ID = ?", (sender_id,))
+        cursor.execute("SELECT USERNAME, BAL FROM NEWBANK WHERE ID = %s", (sender_id,))
         sender_row = cursor.fetchone()
         sender = sender_row['USERNAME']
         sender_bal = sender_row['BAL']
         
         if ttype == 'TRANSFER':
-            cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+            cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
             receiver_row = cursor.fetchone()
             receiver_bal = receiver_row['BAL']
             receiver_new_bal = receiver_bal + amount
-        else: # CASH_OUT
+        else: # CASH_OUT or ADD_MONEY
             receiver_bal = 0.0
             receiver_new_bal = 0.0
             
-        if sender_bal < amount:
+        if ttype != 'ADD_MONEY' and sender_bal < amount:
             cursor.execute("UPDATE pending_transactions SET status = 'FAILED' WHERE token = ?", (token,))
             cursor.execute("ROLLBACK")
             conn.close()
             return jsonify({"status": "error", "message": "Insufficient balance at finalization."}), 400
             
-        sender_new_bal = sender_bal - amount
+        if ttype == 'ADD_MONEY':
+            sender_new_bal = sender_bal + amount
+        else:
+            sender_new_bal = sender_bal - amount
         
-        cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE ID = ?", (sender_new_bal, sender_id))
+        cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE ID = %s", (sender_new_bal, sender_id))
         if ttype == 'TRANSFER':
-            cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE USERNAME = ?", (receiver_new_bal, receiver))
+            cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE USERNAME = %s", (receiver_new_bal, receiver))
+            
+        if ttype == 'ADD_MONEY':
+            cursor.execute("UPDATE deposits SET status = 'APPROVED', balance_after = %s WHERE reference_id = %s", (sender_new_bal, token))
             
         cursor.execute("UPDATE pending_transactions SET status = 'COMPLETED' WHERE token = ?", (token,))
         
         cursor.execute('''
         UPDATE transaction_otp_challenges 
         SET consumed = 1, consumed_at = datetime('now') 
-        WHERE transaction_token = ?
+        WHERE transaction_token = %s
         ''', (token,))
         
         decision_trace = json.loads(pending['decision_trace'])
@@ -1720,10 +1991,11 @@ def finalize_pending_transaction(token):
         
         cursor.execute('''
         INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'APPROVED', %s, %s)
+            RETURNING ID
         ''', (sender, receiver, ttype, amount, sender_bal, sender_new_bal, receiver_bal, receiver_new_bal, is_fraud_predicted, json.dumps(decision_trace)))
         
-        tx_id = cursor.lastrowid
+        tx_id = cursor.fetchone()[0]
         
         tx_event = {
             'id': tx_id,
@@ -1740,6 +2012,14 @@ def finalize_pending_transaction(token):
         socketio.emit('new_transaction', tx_event, to='admin_room')
         
         conn.commit()
+        if ttype == 'ADD_MONEY':
+            try:
+                cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = %s", (sender_id,))
+                email_row = cursor.fetchone()
+                if email_row and email_row['EMAIL']:
+                    send_deposit_email(email_row['EMAIL'], token, amount, sender_bal, sender_new_bal)
+            except Exception as ee:
+                print("[WARN] Failed to send deposit confirmation email", ee)
         conn.close()
         
         session.pop('mfa_pending_token', None)
@@ -1769,7 +2049,7 @@ def get_user_transactions():
     cursor = conn.cursor()
     cursor.execute('''
     SELECT * FROM NEWT 
-    WHERE SENDER = ? OR RECEIVER = ? 
+    WHERE SENDER = %s OR RECEIVER = %s 
     ORDER BY TIMESTAMP DESC 
     LIMIT 50
     ''', (session['username'], session['username']))
@@ -1955,7 +2235,7 @@ def admin_review_action():
         cursor.execute("BEGIN TRANSACTION")
         
         # Check current status is strictly PENDING_REVIEW
-        cursor.execute("SELECT * FROM pending_transactions WHERE token = ? AND status = 'PENDING_REVIEW'", (token,))
+        cursor.execute("SELECT * FROM pending_transactions WHERE token = %s AND status = 'PENDING_REVIEW'", (token,))
         pending = cursor.fetchone()
         
         if not pending:
@@ -1971,14 +2251,14 @@ def admin_review_action():
         risk_level = pending['risk_level']
         reasons = json.loads(pending['reasons']) if pending['reasons'] else []
         
-        cursor.execute("SELECT USERNAME, BAL FROM NEWBANK WHERE ID = ?", (sender_id,))
+        cursor.execute("SELECT USERNAME, BAL FROM NEWBANK WHERE ID = %s", (sender_id,))
         sender_row = cursor.fetchone()
         sender_username = sender_row['USERNAME'] if sender_row else None
         sender_bal = sender_row['BAL'] if sender_row else 0.0
         
         # Enforce idempotency - conditional status update
         target_status = 'COMPLETED' if action == 'APPROVE' else 'BLOCKED'
-        cursor.execute("UPDATE pending_transactions SET status = ? WHERE token = ? AND status = 'PENDING_REVIEW'", (target_status, token))
+        cursor.execute("UPDATE pending_transactions SET status = %s WHERE token = %s AND status = 'PENDING_REVIEW'", (target_status, token))
         
         if cursor.rowcount == 0:
             cursor.execute("ROLLBACK")
@@ -1987,27 +2267,32 @@ def admin_review_action():
             
         if action == 'APPROVE':
             # Recheck balance inside the same SQLite atomic transaction
-            if sender_bal < amount:
+            if ttype != 'ADD_MONEY' and sender_bal < amount:
                 cursor.execute("UPDATE pending_transactions SET status = 'FAILED' WHERE token = ?", (token,))
                 cursor.execute("COMMIT")
                 conn.close()
                 return jsonify({"status": "error", "message": "Insufficient balance for approval."}), 400
                 
-            sender_new_bal = sender_bal - amount
+            if ttype == 'ADD_MONEY':
+                sender_new_bal = sender_bal + amount
+            else:
+                sender_new_bal = sender_bal - amount
             
             # Check receiver account type (CASH_OUT channel vs TRANSFER user)
             if ttype == 'TRANSFER':
-                cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = ?", (receiver,))
+                cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
                 receiver_row = cursor.fetchone()
                 receiver_bal = receiver_row['BAL'] if receiver_row else 0.0
                 receiver_new_bal = receiver_bal + amount
-                cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE USERNAME = ?", (receiver_new_bal, receiver))
-            else: # CASH_OUT
-                # CASH_OUT destination channel
+                cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE USERNAME = %s", (receiver_new_bal, receiver))
+            else: # CASH_OUT or ADD_MONEY
                 receiver_bal = 0.0
                 receiver_new_bal = 0.0
                 
-            cursor.execute("UPDATE NEWBANK SET BAL = ? WHERE ID = ?", (sender_new_bal, sender_id))
+            cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE ID = %s", (sender_new_bal, sender_id))
+            
+            if ttype == 'ADD_MONEY':
+                cursor.execute("UPDATE deposits SET status = 'APPROVED', balance_after = %s WHERE reference_id = %s", (sender_new_bal, token))
             
             # Record decision trace
             decision_trace = json.loads(pending['decision_trace'])
@@ -2019,17 +2304,27 @@ def admin_review_action():
             # Create ledger entry exactly once
             cursor.execute('''
             INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'APPROVED', %s, %s)
+            RETURNING ID
             ''', (sender_username, receiver, ttype, amount, sender_bal, sender_new_bal, receiver_bal, receiver_new_bal, pending['is_fraud_predicted'], json.dumps(decision_trace)))
             
-            tx_id = cursor.lastrowid
+            tx_id = cursor.fetchone()[0]
             
             # Create audit record exactly once
             cursor.execute('''
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-            VALUES (?, 'TRANSACTION_APPROVED_BY_ADMIN', 'MEDIUM', ?)
+            VALUES (%s, 'TRANSACTION_APPROVED_BY_ADMIN', 'MEDIUM', %s)
             ''', (sender_id, f"Admin approved transaction {amount} to {receiver}. Reason: {reason}"))
             
+            if ttype == 'ADD_MONEY':
+                try:
+                    cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = %s", (sender_id,))
+                    email_row = cursor.fetchone()
+                    if email_row and email_row['EMAIL']:
+                        send_deposit_email(email_row['EMAIL'], token, amount, sender_bal, sender_new_bal)
+                except Exception as ee:
+                    print("[WARN] Failed to send admin deposit confirmation email", ee)
+                    
             # Send Socket.IO notifications
             tx_event = {
                 'id': tx_id,
@@ -2056,16 +2351,20 @@ def admin_review_action():
             # Create ledger entry exactly once (mark as BLOCKED)
             cursor.execute('''
             INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BLOCKED', ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'BLOCKED', %s, %s)
+            RETURNING ID
             ''', (sender_username, receiver, ttype, amount, sender_bal, sender_bal, 0.0, 0.0, pending['is_fraud_predicted'], json.dumps(decision_trace)))
             
-            tx_id = cursor.lastrowid
+            tx_id = cursor.fetchone()[0]
             
             # Create audit record exactly once
             cursor.execute('''
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
-            VALUES (?, 'TRANSACTION_REJECTED_BY_ADMIN', 'HIGH', ?)
+            VALUES (%s, 'TRANSACTION_REJECTED_BY_ADMIN', 'HIGH', %s)
             ''', (sender_id, f"Admin rejected transaction {amount} to {receiver}. Reason: {reason}"))
+            
+            if ttype == 'ADD_MONEY':
+                cursor.execute("UPDATE deposits SET status = 'REJECTED' WHERE reference_id = %s", (token,))
             
             tx_event = {
                 'id': tx_id,
@@ -2265,7 +2564,7 @@ def live_risk_preview():
     if not sender_id:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = ?", (sender,))
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = %s", (sender,))
         row = cursor.fetchone()
         conn.close()
         sender_id = row['ID'] if row else None
@@ -2304,7 +2603,7 @@ def get_transaction_trace(tx_id):
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM NEWT WHERE ID = ?", (tx_id,))
+    cursor.execute("SELECT * FROM NEWT WHERE ID = %s", (tx_id,))
     tx = cursor.fetchone()
     conn.close()
     
@@ -2348,7 +2647,7 @@ def handle_live_risk_check(data):
     if not sender_id:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = ?", (sender,))
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = %s", (sender,))
         row = cursor.fetchone()
         conn.close()
         if row:
@@ -2397,6 +2696,497 @@ def handle_join_admin():
         emit('admin_status', {"status": "joined"})
     else:
         emit('admin_status', {"status": "error", "message": "Access denied"})
+
+
+
+# ==========================================
+# SMART WALLET - ADD MONEY API ENDPOINTS
+# ==========================================
+
+@app.route('/api/add-money/initiate', methods=['POST'])
+def add_money_initiate():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "Missing request payload."}), 400
+            
+        amount = float(data.get('amount', 0))
+        method = data.get('method', '').strip()
+        gateway = data.get('gateway', '').strip()
+        remarks = data.get('remarks', '').strip()
+        
+        if amount < 100 or amount > 200000:
+            return jsonify({"status": "error", "message": "Transaction amount must be between INR 100 and INR 2,00,000."}), 400
+            
+        if method not in ['UPI', 'Debit Card', 'Credit Card', 'Net Banking']:
+            return jsonify({"status": "error", "message": "Invalid payment method."}), 400
+            
+        if gateway not in ['Google Pay', 'PhonePe', 'Paytm', 'BHIM', 'Visa', 'MasterCard', 'RuPay']:
+            return jsonify({"status": "error", "message": "Invalid payment gateway."}), 400
+            
+        user_id = session['user_id']
+        username = session['username']
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Deduplication Filter (10 seconds)
+        cursor.execute('''
+        SELECT COUNT(*) FROM deposits 
+        WHERE user_id = %s AND amount = %s AND method = %s AND gateway = %s AND timestamp >= datetime('now', '-10 seconds')
+        ''', (user_id, amount, method, gateway))
+        if cursor.fetchone()[0] > 0:
+            conn.close()
+            return jsonify({"status": "error", "message": "Duplicate submission detected. Please wait 10 seconds."}), 400
+            
+        # 2. Rate Limit: 20 deposits / day
+        cursor.execute('''
+        SELECT COUNT(*) FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED' AND timestamp >= datetime('now', '-1 day')
+        ''', (user_id,))
+        if cursor.fetchone()[0] >= 20:
+            conn.close()
+            return jsonify({"status": "error", "message": "Daily deposit limit (20) reached."}), 400
+            
+        # Get current balance
+        cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE ID = %s", (user_id,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            conn.close()
+            return jsonify({"status": "error", "message": "User not found."}), 404
+        current_bal = user_row['BAL']
+        email = user_row['EMAIL']
+        
+        # 3. Generate Reference ID
+        import uuid
+        ref_id = f"DEP-{uuid.uuid4().hex[:8].upper()}"
+        
+        # 4. Compute Hybrid Risk Score
+        risk_score, risk_level, reasons, is_fraud_predicted, breakdown, ml_probability = compute_hybrid_risk(user_id, username, 'Wallet', amount, 'ADD_MONEY')
+        
+        # Apply amount overrides
+        if amount > 50000:
+            if risk_score < 70:
+                risk_score = 75
+                reasons.append("Amount exceeds INR 50,000 (High Risk)")
+        elif amount > 20000:
+            if risk_score < 40:
+                risk_score = 45
+                reasons.append("Amount exceeds INR 20,000 (Medium Risk)")
+                
+        # Classify risk level
+        if risk_score >= 90:
+            risk_level = 'CRITICAL'
+        elif risk_score >= 70:
+            risk_level = 'HIGH'
+        elif risk_score >= 40:
+            risk_level = 'MEDIUM'
+        else:
+            risk_level = 'LOW'
+            
+        decision_trace = {
+            "reasons": reasons,
+            "is_fraud_predicted": is_fraud_predicted,
+            "breakdown": breakdown,
+            "ml_probability": ml_probability,
+            "reference_id": ref_id,
+            "gateway": gateway,
+            "method": method
+        }
+            
+        ip_addr = request.remote_addr
+        user_agent = request.headers.get('User-Agent', 'Unknown')
+        
+        cursor.execute("BEGIN TRANSACTION")
+        
+        if risk_level == 'LOW':
+            # Immediate success
+            new_bal = current_bal + amount
+            cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE ID = %s", (new_bal, user_id))
+            
+            # Save deposit
+            cursor.execute('''
+            INSERT INTO deposits (reference_id, user_id, amount, method, gateway, status, risk_score, risk_level, remarks, balance_before, balance_after, ip_address, device)
+            VALUES (%s, %s, %s, %s, %s, 'APPROVED', %s, %s, %s, %s, %s, %s, %s)
+            ''', (ref_id, user_id, amount, method, gateway, risk_score, risk_level, remarks, current_bal, new_bal, ip_addr, user_agent))
+            
+            # Save transaction ledger
+            cursor.execute('''
+            INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
+            VALUES (%s, 'Wallet', 'ADD_MONEY', %s, %s, %s, 0.0, 0.0, 'APPROVED', 0, %s)
+            ''', (username, amount, current_bal, new_bal, json.dumps(decision_trace)))
+            
+            # Create audit record
+            cursor.execute('''
+            INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+            VALUES (%s, 'WALLET_DEPOSIT_SUCCESS', 'LOW', %s)
+            ''', (user_id, f"Added INR {amount} via {method}/{gateway}"))
+            
+            conn.commit()
+            conn.close()
+            
+            # Send confirmation email
+            if email:
+                send_deposit_email(email, ref_id, amount, current_bal, new_bal)
+                
+            return jsonify({
+                "status": "success",
+                "reference_id": ref_id,
+                "risk_level": "LOW",
+                "risk_score": risk_score,
+                "message": "Money added successfully!"
+            })
+            
+        elif risk_level in ['MEDIUM', 'HIGH']:
+            # PENDING_MFA
+            cursor.execute('''
+            INSERT INTO deposits (reference_id, user_id, amount, method, gateway, status, risk_score, risk_level, remarks, balance_before, balance_after, ip_address, device)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING_MFA', %s, %s, %s, %s, %s, %s, %s)
+            ''', (ref_id, user_id, amount, method, gateway, risk_score, risk_level, remarks, current_bal, current_bal, ip_addr, user_agent))
+            
+            # Create pending_transactions entry
+            expires_at = (datetime.datetime.now() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute('''
+            INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, status, expires_at, decision_trace)
+            VALUES (%s, %s, 'Wallet', %s, 'ADD_MONEY', %s, %s, %s, 0, 'PENDING', %s, %s)
+            ''', (ref_id, user_id, amount, risk_score, risk_level, json.dumps(reasons), expires_at, json.dumps(decision_trace)))
+            
+            # Generate OTP
+            import random
+            otp = f"{random.randint(100000, 999999)}"
+            otp_hash = hash_otp(otp)
+            otp_expires = (datetime.datetime.now() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+            
+            cursor.execute('''
+            INSERT INTO transaction_otp_challenges (user_id, transaction_token, otp_hash, expires_at)
+            VALUES (%s, %s, %s, %s)
+            ''', (user_id, ref_id, otp_hash, otp_expires))
+            
+            conn.commit()
+            conn.close()
+            
+            # Send OTP email
+            send_otp_email(email, otp, amount, 'Smart Wallet')
+            session['mfa_pending_token'] = ref_id
+            
+            return jsonify({
+                "status": "verification_required",
+                "reference_id": ref_id,
+                "risk_level": risk_level,
+                "risk_score": risk_score,
+                "otp_required": True,
+                "face_required": (risk_level == 'HIGH')
+            })
+            
+        else: # CRITICAL
+            # PENDING_REVIEW
+            cursor.execute('''
+            INSERT INTO deposits (reference_id, user_id, amount, method, gateway, status, risk_score, risk_level, remarks, balance_before, balance_after, ip_address, device)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING_REVIEW', %s, %s, %s, %s, %s, %s, %s)
+            ''', (ref_id, user_id, amount, method, gateway, risk_score, risk_level, remarks, current_bal, current_bal, ip_addr, user_agent))
+            
+            # Create pending_transactions for Admin Review Queue
+            expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute('''
+            INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, status, expires_at, decision_trace)
+            VALUES (%s, %s, 'Wallet', %s, 'ADD_MONEY', %s, %s, %s, 1, 'PENDING_REVIEW', %s, %s)
+            ''', (ref_id, user_id, amount, risk_score, risk_level, json.dumps(reasons), expires_at, json.dumps(decision_trace)))
+            
+            # Create audit record
+            cursor.execute('''
+            INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+            VALUES (%s, 'WALLET_DEPOSIT_HELD_REVIEW', 'HIGH', %s)
+            ''', (user_id, f"Deposit of INR {amount} held for admin review due to CRITICAL risk score {risk_score}."))
+            
+            conn.commit()
+            
+            # Send Socket.IO notification to admin dashboard
+            try:
+                socketio.emit('new_pending_review', {
+                    'token': ref_id,
+                    'username': username,
+                    'amount': amount,
+                    'ttype': 'ADD_MONEY',
+                    'risk_score': risk_score,
+                    'risk_level': 'CRITICAL'
+                })
+            except Exception as se:
+                print(f"[WARN] Socket.IO notification failed: {se}", flush=True)
+                
+            conn.close()
+            return jsonify({
+                "status": "pending_review",
+                "reference_id": ref_id,
+                "risk_level": "CRITICAL",
+                "risk_score": risk_score,
+                "message": "Deposit held for administrative review due to CRITICAL security score."
+            })
+            
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": f"Server error: {e}"}), 500
+
+@app.route('/api/add-money/verify', methods=['POST'])
+def add_money_verify():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        data = request.get_json()
+        ref_id = data.get('reference_id', '').strip()
+        if not ref_id:
+            return jsonify({"status": "error", "message": "Reference ID is required."}), 400
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM deposits WHERE reference_id = %s AND user_id = %s", (ref_id, session['user_id']))
+        dep = cursor.fetchone()
+        conn.close()
+        
+        if not dep:
+            return jsonify({"status": "error", "message": "Deposit transaction not found."}), 404
+            
+        return jsonify({
+            "status": "success",
+            "deposit": {
+                "reference_id": dep['reference_id'],
+                "amount": dep['amount'],
+                "method": dep['method'],
+                "gateway": dep['gateway'],
+                "status": dep['status'],
+                "risk_level": dep['risk_level'],
+                "balance_before": dep['balance_before'],
+                "balance_after": dep['balance_after'],
+                "timestamp": str(dep['timestamp'])
+            }
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/add-money/history', methods=['GET'])
+def add_money_history():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT * FROM deposits 
+        WHERE user_id = %s 
+        ORDER BY timestamp DESC
+        ''', (session['user_id'],))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        history = []
+        for r in rows:
+            history.append({
+                "reference_id": r['reference_id'],
+                "amount": r['amount'],
+                "method": r['method'],
+                "gateway": r['gateway'],
+                "status": r['status'],
+                "risk_level": r['risk_level'],
+                "balance_before": r['balance_before'],
+                "balance_after": r['balance_after'],
+                "timestamp": str(r['timestamp'])
+            })
+        return jsonify({"status": "success", "history": history})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/add-money/receipt/<reference_id>', methods=['GET'])
+def add_money_receipt(reference_id):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT d.*, u.USERNAME, u.BAL 
+        FROM deposits d
+        JOIN NEWBANK u ON d.user_id = u.ID
+        WHERE d.reference_id = %s AND d.user_id = %s
+        ''', (reference_id, user_id))
+        dep = cursor.fetchone()
+        conn.close()
+        
+        if not dep:
+            return jsonify({"status": "error", "message": "Deposit receipt not found."}), 404
+            
+        from io import BytesIO
+        buffer = BytesIO()
+        
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.graphics.barcode import createBarcodeDrawing
+        
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        styles = getSampleStyleSheet()
+        
+        primary_color = colors.HexColor("#9b5de5")
+        text_color = colors.HexColor("#0f172a")
+        
+        story = []
+        
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=primary_color,
+            spaceAfter=20,
+            alignment=1
+        )
+        story.append(Paragraph("SMART BANKING - RECEIPT", title_style))
+        story.append(Spacer(1, 10))
+        
+        # QR Code Drawing
+        qr_code = createBarcodeDrawing('QR', value=f"https://smartbanking.com/verify/{reference_id}", width=80, height=80)
+        
+        data = [
+            [Paragraph("<b>Transaction ID</b>", styles['Normal']), Paragraph(str(dep['id']), styles['Normal'])],
+            [Paragraph("<b>Reference ID</b>", styles['Normal']), Paragraph(str(dep['reference_id']), styles['Normal'])],
+            [Paragraph("<b>Timestamp</b>", styles['Normal']), Paragraph(str(dep['timestamp']), styles['Normal'])],
+            [Paragraph("<b>Payment Method</b>", styles['Normal']), Paragraph(str(dep['method']), styles['Normal'])],
+            [Paragraph("<b>Gateway</b>", styles['Normal']), Paragraph(str(dep['gateway']), styles['Normal'])],
+            [Paragraph("<b>Deposit Amount</b>", styles['Normal']), Paragraph(f"INR {dep['amount']:,.2f}", styles['Normal'])],
+            [Paragraph("<b>Status</b>", styles['Normal']), Paragraph(str(dep['status']), styles['Normal'])],
+            [Paragraph("<b>Balance Before</b>", styles['Normal']), Paragraph(f"INR {dep['balance_before']:,.2f}", styles['Normal'])],
+            [Paragraph("<b>Balance After</b>", styles['Normal']), Paragraph(f"INR {dep['balance_after']:,.2f}", styles['Normal'])],
+            [Paragraph("<b>Verification QR</b>", styles['Normal']), qr_code]
+        ]
+        
+        t = Table(data, colWidths=[200, 300])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
+            ('TEXTCOLOR', (0, 0), (-1, -1), text_color),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f8fafc")),
+        ]))
+        
+        story.append(t)
+        doc.build(story)
+        
+        buffer.seek(0)
+        from flask import Response
+        return Response(
+            buffer.getvalue(),
+            mimetype='application/pdf',
+            headers={"Content-Disposition": f"attachment;filename=Receipt_{reference_id}.pdf"}
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/add-money/analytics', methods=['GET'])
+def add_money_analytics():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Today's Deposits
+        cursor.execute('''
+        SELECT COALESCE(SUM(amount), 0) FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED' AND timestamp >= datetime('now', '-1 day')
+        ''', (user_id,))
+        today = cursor.fetchone()[0]
+        
+        # Weekly Deposits
+        cursor.execute('''
+        SELECT COALESCE(SUM(amount), 0) FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED' AND timestamp >= datetime('now', '-7 days')
+        ''', (user_id,))
+        weekly = cursor.fetchone()[0]
+        
+        # Monthly Deposits
+        cursor.execute('''
+        SELECT COALESCE(SUM(amount), 0) FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED' AND timestamp >= datetime('now', '-30 days')
+        ''', (user_id,))
+        monthly = cursor.fetchone()[0]
+        
+        # Average Deposit
+        cursor.execute('''
+        SELECT COALESCE(AVG(amount), 0) FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED'
+        ''', (user_id,))
+        avg_dep = cursor.fetchone()[0]
+        
+        # Largest Deposit
+        cursor.execute('''
+        SELECT COALESCE(MAX(amount), 0) FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED'
+        ''', (user_id,))
+        largest = cursor.fetchone()[0]
+        
+        # Success Rate
+        cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s", (user_id,))
+        total_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'APPROVED'", (user_id,))
+        success_count = cursor.fetchone()[0]
+        success_rate = (success_count / total_count * 100) if total_count > 0 else 100.0
+        
+        # Deposit Trend
+        cursor.execute('''
+        SELECT strftime('%%Y-%%m-%%d', timestamp) as day, COALESCE(SUM(amount), 0) as total 
+        FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED' AND timestamp >= datetime('now', '-30 days')
+        GROUP BY day 
+        ORDER BY day ASC
+        ''', (user_id,))
+        trend = [{"day": row['day'], "total": row['total']} for row in cursor.fetchall()]
+        
+        # Gateway Distribution
+        cursor.execute('''
+        SELECT gateway, COUNT(*) as count 
+        FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED'
+        GROUP BY gateway
+        ''', (user_id,))
+        gateways = [{"gateway": row['gateway'], "count": row['count']} for row in cursor.fetchall()]
+        
+        # Payment Method Distribution
+        cursor.execute('''
+        SELECT method, COUNT(*) as count 
+        FROM deposits 
+        WHERE user_id = %s AND status = 'APPROVED'
+        GROUP BY method
+        ''', (user_id,))
+        methods = [{"method": row['method'], "count": row['count']} for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "today": today,
+            "weekly": weekly,
+            "monthly": monthly,
+            "avg_dep": avg_dep,
+            "largest": largest,
+            "success_rate": success_rate,
+            "trend": trend,
+            "gateways": gateways,
+            "methods": methods
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     init_db()

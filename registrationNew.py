@@ -1,11 +1,11 @@
+from db_helper import get_db_connection
 # -*- coding: utf-8 -*-
 
 
 from PyQt5 import QtCore, QtGui, QtWidgets
-import sqlite3
 from MainLogin import Ui_LoginWindow
 from PyQt5.QtWidgets import QMessageBox
-dbb = sqlite3.connect('BankNH.db')
+dbb = get_db_connection()
 c = dbb.cursor()
 
 class Ui_registrationPage(object):

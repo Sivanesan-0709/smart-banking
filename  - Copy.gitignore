@@ -1,0 +1,17 @@
+models/
+__pycache__/
+*.bak
+*.zip
+*.log
+.agents/
+.gemini/
+*.db-journal
+
+# Local database and secrets
+*.db
+.env
+.env.*
+*.sqlite
+*.sqlite3
+venv/
+.venv/

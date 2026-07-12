@@ -160,6 +160,25 @@
                                 <span class="badge badge-success"><i class="fa-solid fa-circle-check"></i> Account Active</span>
                             </div>
                         </div>
+                        <div class="metric-card wallet-card glow-purple">
+                            <div class="card-icon" style="color: #9b5de5;"><i class="fa-solid fa-wallet"></i></div>
+                            <div class="card-info" style="width: 100%;">
+                                <h3>Smart Wallet</h3>
+                                <p class="metric-value">₹<span id="walletBalance">0.00</span></p>
+                                <div class="wallet-stats" style="margin-top: 10px; font-size: 0.8rem; line-height: 1.4; display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
+                                    <div>Today: ₹<span id="walletToday">0.00</span></div>
+                                    <div>Monthly: ₹<span id="walletMonthly">0.00</span></div>
+                                    <div>Largest: ₹<span id="walletLargest">0.00</span></div>
+                                    <div>Success Rate: <span id="walletSuccessRate">100</span>%</div>
+                                </div>
+                                <div class="quick-add-grid" style="margin-top: 10px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;">
+                                    <button class="btn btn-accent btn-sm" onclick="quickAdd(500)" style="padding: 4px 6px; font-size: 0.75rem; border-radius: 4px;">+₹500</button>
+                                    <button class="btn btn-accent btn-sm" onclick="quickAdd(1000)" style="padding: 4px 6px; font-size: 0.75rem; border-radius: 4px;">+₹1k</button>
+                                    <button class="btn btn-accent btn-sm" onclick="quickAdd(5000)" style="padding: 4px 6px; font-size: 0.75rem; border-radius: 4px;">+₹5k</button>
+                                    <button class="btn btn-accent btn-sm" onclick="openAddMoneyModal()" style="padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; background: #9b5de5; border-color: #9b5de5;">Top Up</button>
+                                </div>
+                            </div>
+                        </div>
                         <div class="metric-card">
                             <div class="card-icon"><i class="fa-solid fa-circle-arrow-up"></i></div>
                             <div class="card-info">
@@ -244,6 +263,17 @@
                                 <div class="card-header-row">
                                     <h2><i class="fa-solid fa-list-check"></i> Transaction Ledger</h2>
                                     <span class="card-header-badge" id="txCountBadge">0 Records</span>
+                                </div>
+                                <div class="ledger-controls" style="margin-top: 10px; margin-bottom: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+                                    <input type="text" id="txSearchInput" placeholder="Search transactions..." oninput="filterTransactions()" style="flex: 1; min-width: 150px; padding: 6px 10px; font-size: 0.8rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;">
+                                    <select id="txTypeFilter" onchange="filterTransactions()" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;">
+                                        <option value="ALL">All Types</option>
+                                        <option value="TRANSFER">Transfers</option>
+                                        <option value="CASH_OUT">Cash Out</option>
+                                        <option value="ADD_MONEY">Deposits</option>
+                                    </select>
+                                    <button class="btn btn-outline btn-sm" onclick="exportLedger('csv')"><i class="fa-solid fa-file-csv"></i> CSV</button>
+                                    <button class="btn btn-outline btn-sm" onclick="exportLedger('pdf')"><i class="fa-solid fa-file-pdf"></i> PDF</button>
                                 </div>
                                 <div class="table-container flex-grow">
                                     <table id="transactionsTable">
@@ -668,6 +698,86 @@
                 </div>
             </main>
         </section>
+    </div>
+
+    <!-- ADD MONEY MODAL -->
+    <div id="addMoneyModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-wallet"></i> Smart Wallet Top-Up</h2>
+                <button class="close-modal" onclick="closeAddMoneyModal()">&times;</button>
+            </div>
+            
+            <!-- Setup Form -->
+            <div id="addMoneySetup">
+                <div class="input-group">
+                    <label for="depositAmount">Amount (INR)</label>
+                    <input type="number" id="depositAmount" placeholder="Min ₹100, Max ₹2,00,000" min="100" max="200000" required style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                </div>
+                
+                <div class="quick-add-grid" style="margin-top: 10px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 15px;">
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(500)">₹500</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(1000)">₹1000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(2000)">₹2000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(5000)">₹5000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(10000)">₹10000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(20000)">₹20000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(50000)">₹50000</button>
+                </div>
+                
+                <div class="input-group">
+                    <label for="depositMethod">Payment Method</label>
+                    <select id="depositMethod" onchange="updateGatewayOptions()" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                        <option value="UPI">UPI</option>
+                        <option value="Debit Card">Debit Card</option>
+                        <option value="Credit Card">Credit Card</option>
+                        <option value="Net Banking">Net Banking</option>
+                    </select>
+                </div>
+                
+                <div class="input-group" style="margin-top: 15px;">
+                    <label for="depositGateway">Payment Gateway / Bank</label>
+                    <select id="depositGateway" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                        <!-- Populated dynamically -->
+                    </select>
+                </div>
+                
+                <div class="input-group" style="margin-top: 15px; margin-bottom: 20px;">
+                    <label for="depositRemarks">Remarks (Optional)</label>
+                    <input type="text" id="depositRemarks" placeholder="Purpose of deposit" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                </div>
+                
+                <button class="btn btn-accent btn-block" onclick="startDepositVerification()">
+                    <span>Proceed to Deposit</span> <i class="fa-solid fa-arrow-right"></i>
+                </button>
+            </div>
+            
+            <!-- Simulator Screen -->
+            <div id="addMoneySimulator" class="hidden" style="text-align: center; padding: 30px 10px;">
+                <div class="loader-spinner" style="margin: 0 auto 20px auto; width: 60px; height: 60px; border: 4px dashed #9b5de5; border-radius: 50%; animation: spin 1.5s linear infinite;"></div>
+                <h3 id="simulatorStatus" style="color: #9b5de5; font-size: 1.3rem;">Connecting...</h3>
+                <p class="text-muted" style="margin-top: 10px;">Establishing secure banking gateway channel...</p>
+            </div>
+            
+            <!-- Success Screen -->
+            <div id="addMoneySuccess" class="hidden" style="text-align: center; padding: 20px 10px;">
+                <div style="color: #10b981; font-size: 3rem; margin-bottom: 15px;"><i class="fa-solid fa-circle-check"></i></div>
+                <h2 style="color: #10b981;">Deposit Successful!</h2>
+                <p style="margin-top: 10px; font-size: 1.1rem;">Amount: <strong>INR <span id="successDepositAmount">0.00</span></strong></p>
+                
+                <div style="margin: 20px 0; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 8px; text-align: left; font-size: 0.9rem; line-height: 1.6;">
+                    <div>Reference: <strong id="successDepositRef">DEP-XXXXXX</strong></div>
+                    <div>Gateway: <strong id="successDepositGateway">UPI</strong></div>
+                    <div>Method: <strong id="successDepositMethod">Google Pay</strong></div>
+                    <div>New Wallet Balance: <strong>INR <span id="successDepositBalance">0.00</span></strong></div>
+                </div>
+                
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn btn-accent flex-grow" onclick="downloadDepositReceipt()"><i class="fa-solid fa-file-pdf"></i> Download Receipt</button>
+                    <button class="btn btn-outline" onclick="closeAddMoneyModal()">Close</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- PROFILE MANAGEMENT MODAL -->

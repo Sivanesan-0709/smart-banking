@@ -1,6 +1,6 @@
+from db_helper import get_db_connection
 import sys
 from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox
-import sqlite3
 import random
 import sklearn
 import pickle
@@ -131,10 +131,9 @@ class Ui_TransferWindow(object):
         mssg.exec_()
 
     def SendTransfer(self):
-        import sqlite3
-
+        
         # Create a connection to the BANKNH database
-        conn = sqlite3.connect("BankNH.db")
+        conn = get_db_connection()
         cur = conn.cursor()
 
         # Create the NEW table if it doesn't exist
@@ -249,7 +248,7 @@ class Ui_TransferWindow(object):
             print(f"Sender Username: {sender_username}")
             print(f"Receiver Username: {receiver_username}")
 
-        except sqlite3.Error as e:
+        except Exception as e:
             self.message('Database Error', str(e))
         finally:
             conn.close()
@@ -318,7 +317,7 @@ class Ui_TransferWindow(object):
         sys.exit(app.exec_())
 
     # def update_table(self):
-    #     conn = sqlite3.connect('BankNH.db')
+    #     conn = get_db_connection()
     #     cur = conn.cursor()
     #     sender_username = self.lineEdit_name2txf.text()
     #     amount = self.lineEdit_amount2txf.text()
