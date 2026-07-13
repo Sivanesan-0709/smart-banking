@@ -34,6 +34,82 @@ if os.path.exists(env_path):
                 os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
 app = Flask(__name__)
+
+def create_notification(user_id, title, message, ntype="SYSTEM", cursor=None):
+    try:
+        if cursor:
+            cursor.execute('''
+            INSERT INTO notifications (user_id, title, message, type)
+            VALUES (%s, %s, %s, %s)
+            ''', (user_id, title, message, ntype))
+        else:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('''
+            INSERT INTO notifications (user_id, title, message, type)
+            VALUES (%s, %s, %s, %s)
+            ''', (user_id, title, message, ntype))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"[ERROR] Failed to create notification: {e}", flush=True)
+
+def parse_user_agent(ua_string):
+    if not ua_string:
+        return "Unknown", "Unknown", "Unknown"
+    ua = ua_string.lower()
+    if "chrome" in ua:
+        browser = "Chrome"
+    elif "firefox" in ua:
+        browser = "Firefox"
+    elif "safari" in ua:
+        browser = "Safari"
+    elif "edge" in ua:
+        browser = "Edge"
+    else:
+        browser = "Mobile Browser" if "mobile" in ua else "Other Browser"
+        
+    if "windows" in ua:
+        os_name = "Windows"
+    elif "macintosh" in ua or "mac os" in ua:
+        os_name = "macOS"
+    elif "android" in ua:
+        os_name = "Android"
+    elif "iphone" in ua or "ipad" in ua:
+        os_name = "iOS"
+    elif "linux" in ua:
+        os_name = "Linux"
+    else:
+        os_name = "Unknown OS"
+        
+    if "mobile" in ua or "android" in ua or "iphone" in ua:
+        device_type = "Mobile"
+    elif "ipad" in ua or "tablet" in ua:
+        device_type = "Tablet"
+    else:
+        device_type = "Desktop"
+        
+    return browser, os_name, device_type
+
+@app.before_request
+def check_session_validity():
+    if request.path.startswith('/static') or request.path in ['/api/login', '/api/register', '/api/logout']:
+        return
+    if 'username' in session and 'session_id' in session:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM login_history WHERE session_id = %s", (session['session_id'],))
+        row = cursor.fetchone()
+        if row:
+            if row['status'] == 'REVOKED':
+                session.clear()
+                conn.close()
+                return jsonify({"status": "error", "message": "Session has been revoked."}), 401
+            else:
+                utc_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute("UPDATE login_history SET last_activity = %s WHERE session_id = %s", (utc_now, session['session_id']))
+                conn.commit()
+        conn.close()
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=None)
 
 is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
@@ -451,6 +527,53 @@ def init_db():
         )
         ''')
         
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS beneficiaries (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            beneficiary_username VARCHAR(100) NOT NULL REFERENCES NEWBANK(USERNAME) ON DELETE CASCADE,
+            nickname VARCHAR(100),
+            is_favorite INTEGER DEFAULT 0,
+            transfer_count INTEGER DEFAULT 0,
+            total_transferred DOUBLE PRECISION DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, beneficiary_username)
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_beneficiaries_user ON beneficiaries(user_id)")
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS login_history (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            session_id VARCHAR(255) NOT NULL UNIQUE,
+            browser VARCHAR(100),
+            os VARCHAR(100),
+            ip_address VARCHAR(50),
+            device_type VARCHAR(50),
+            device_fingerprint VARCHAR(100),
+            is_trusted INTEGER DEFAULT 0,
+            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            logout_time TIMESTAMP,
+            status VARCHAR(20) DEFAULT 'ACTIVE'
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_history_user ON login_history(user_id)")
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS notifications (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            title VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            type VARCHAR(50) DEFAULT 'SYSTEM',
+            is_read INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)")
+        
     else:
         print("[INFO] Migrating schema to SQLite...", flush=True)
         cursor.execute('''
@@ -654,6 +777,57 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_status ON NEWT(STATUS)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_face_attempts_user ON face_verification_attempts(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username)")
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS beneficiaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            beneficiary_username TEXT NOT NULL,
+            nickname TEXT,
+            is_favorite INTEGER DEFAULT 0,
+            transfer_count INTEGER DEFAULT 0,
+            total_transferred DOUBLE PRECISION DEFAULT 0.0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID),
+            FOREIGN KEY(beneficiary_username) REFERENCES NEWBANK(USERNAME),
+            UNIQUE(user_id, beneficiary_username)
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_beneficiaries_user ON beneficiaries(user_id)")
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS login_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL UNIQUE,
+            browser TEXT,
+            os TEXT,
+            ip_address TEXT,
+            device_type TEXT,
+            device_fingerprint TEXT,
+            is_trusted INTEGER DEFAULT 0,
+            login_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+            logout_time DATETIME,
+            status TEXT DEFAULT 'ACTIVE',
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_history_user ON login_history(user_id)")
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            type TEXT DEFAULT 'SYSTEM',
+            is_read INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)")
         
     conn.commit()
     conn.close()
@@ -872,6 +1046,25 @@ def login():
                 session['username'] = user['USERNAME']
                 session['user_id'] = user['ID']
                 session['is_admin'] = (user['USERNAME'].lower() == 'admin' or user['USERNAME'].lower() == 'auditor')
+                
+                import uuid
+                sess_id = uuid.uuid4().hex
+                session['session_id'] = sess_id
+                
+                ua = request.headers.get('User-Agent', '')
+                browser, os_name, dev_type = parse_user_agent(ua)
+                ip = request.remote_addr or '127.0.0.1'
+                fingerprint = request.headers.get('X-Device-Fingerprint', 'default_fingerprint')
+                
+                cursor.execute('''
+                INSERT INTO login_history (user_id, session_id, browser, os, ip_address, device_type, device_fingerprint, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
+                ''', (user['ID'], sess_id, browser, os_name, ip, dev_type, fingerprint))
+                
+                # Notify
+                create_notification(user['ID'], "New Login Session", f"Authorized entry from browser {browser} on {os_name} (IP: {ip}).", "SECURITY", cursor=cursor)
+                
+                conn.commit()
                 
                 res_user = {
                     "username": user['USERNAME'],
@@ -1320,7 +1513,7 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
         receiver_bal = receiver_bal_row['BAL'] if receiver_bal_row else 0.0
         
         df_pred = pd.DataFrame([{
-            'type': ttype,
+            'type': 'TRANSFER' if ttype == 'QR_PAYMENT' else ttype,
             'amount': amount,
             'oldbalanceOrig': sender_bal,
             'newbalanceOrig': sender_bal - amount,
@@ -1440,15 +1633,38 @@ def transfer_initiate():
         print(f"[DEBUG] [Database connection opened] took {time.time() - t_db:.4f}s", flush=True)
 
         # Check transaction type
-        if ttype not in ['TRANSFER', 'CASH_OUT']:
+        if ttype not in ['TRANSFER', 'CASH_OUT', 'QR_PAYMENT']:
             conn.close()
             print("END /api/transfer/initiate", flush=True)
             print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
             return jsonify({"status": "error", "message": "Invalid transaction type."}), 400
 
+        if ttype == 'QR_PAYMENT':
+            qr_token = data.get('qr_token', '').strip()
+            if not qr_token:
+                conn.close()
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+                return jsonify({"status": "error", "message": "Signed QR token is required for QR payments."}), 400
+            try:
+                from itsdangerous import URLSafeTimedSerializer
+                serializer = URLSafeTimedSerializer(app.secret_key, salt="qr-payment-salt")
+                token_data = serializer.loads(qr_token, max_age=300)
+                token_receiver = token_data["username"]
+                if token_receiver != receiver:
+                    conn.close()
+                    print("END /api/transfer/initiate", flush=True)
+                    print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+                    return jsonify({"status": "error", "message": "QR token does not match recipient."}), 400
+            except Exception:
+                conn.close()
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+                return jsonify({"status": "error", "message": "Invalid or expired QR code token."}), 400
+
         # Check receiver exists based on transaction type
         t_rec = time.time()
-        if ttype == 'TRANSFER':
+        if ttype in ['TRANSFER', 'QR_PAYMENT']:
             cursor.execute("SELECT ID, BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
             receiver_row = cursor.fetchone()
             if not receiver_row:
@@ -1518,6 +1734,43 @@ def transfer_initiate():
             except:
                 pass
 
+        # Phase 4 XAI features
+        triggered_policies = []
+        feature_contributions = {}
+        total_points = sum(breakdown.values()) or 1
+        for feat, pts in breakdown.items():
+            pct = int((pts / total_points) * 100)
+            if pct > 0:
+                feature_contributions[feat] = pct
+                
+        for r in reasons:
+            if "High Volume" in r or "large transaction" in r.lower():
+                triggered_policies.append("POL-101: Large Transaction Threshold")
+            elif "Emptying" in r or "liquid balance" in r.lower():
+                triggered_policies.append("POL-102: Liquidity Depletion Check")
+            elif "Velocity" in r or "rapid successive" in r.lower():
+                triggered_policies.append("POL-103: Transfer Velocity Limit")
+            elif "Beneficiary" in r or "new recipient" in r.lower():
+                triggered_policies.append("POL-104: Unverified Recipient Verification")
+            elif "Model" in r or "fraud predicted" in r.lower():
+                triggered_policies.append("POL-105: Supervised ML Model Anomaly")
+                
+        if not triggered_policies:
+            triggered_policies.append("POL-000: Standard Low Risk Profile")
+            
+        if risk_level == 'LOW':
+            recommendation = "Approved: No immediate threat flags detected."
+            confidence = max(90, 100 - risk_score)
+        elif risk_level == 'MEDIUM':
+            recommendation = "MFA Required: Request 2FA verification to confirm user identity."
+            confidence = max(80, 100 - risk_score)
+        elif risk_level == 'HIGH':
+            recommendation = "Adaptive MFA Required: OTP + Face Biometrics required to verify live authorization."
+            confidence = max(75, 100 - risk_score)
+        else:
+            recommendation = "Hold: Intercept transaction and route to manual review queue."
+            confidence = max(95, risk_score)
+
         decision_trace = {
             "risk_score": risk_score,
             "risk_level": risk_level,
@@ -1526,7 +1779,11 @@ def transfer_initiate():
             "ml_probability": ml_probability,
             "feature_importances": feature_importances,
             "auth_required": [],
-            "auth_completed": []
+            "auth_completed": [],
+            "confidence": confidence,
+            "feature_contributions": feature_contributions,
+            "triggered_policies": triggered_policies,
+            "recommendation": recommendation
         }
 
         if risk_level == 'MEDIUM':
@@ -1946,7 +2203,7 @@ def finalize_pending_transaction(token):
         sender = sender_row['USERNAME']
         sender_bal = sender_row['BAL']
         
-        if ttype == 'TRANSFER':
+        if ttype in ['TRANSFER', 'QR_PAYMENT']:
             cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
             receiver_row = cursor.fetchone()
             receiver_bal = receiver_row['BAL']
@@ -1967,13 +2224,46 @@ def finalize_pending_transaction(token):
             sender_new_bal = sender_bal - amount
         
         cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE ID = %s", (sender_new_bal, sender_id))
-        if ttype == 'TRANSFER':
+        if ttype in ['TRANSFER', 'QR_PAYMENT']:
             cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE USERNAME = %s", (receiver_new_bal, receiver))
             
         if ttype == 'ADD_MONEY':
             cursor.execute("UPDATE deposits SET status = 'APPROVED', balance_after = %s WHERE reference_id = %s", (sender_new_bal, token))
             
         cursor.execute("UPDATE pending_transactions SET status = 'COMPLETED' WHERE token = ?", (token,))
+        
+        # Notify
+        if ttype == 'ADD_MONEY':
+            create_notification(sender_id, "Smart Wallet Credit", f"Successfully topped up wallet with Rs {amount:.2f}.", "DEPOSIT", cursor=cursor)
+        elif ttype in ['TRANSFER', 'QR_PAYMENT']:
+            create_notification(sender_id, "Funds Transferred", f"Debit of Rs {amount:.2f} to {receiver} completed.", "TRANSFER", cursor=cursor)
+            try:
+                # Try loading recipient ID to notify them
+                cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = %s", (receiver,))
+                rec_row = cursor.fetchone()
+                if rec_row:
+                    create_notification(rec_row['ID'], "Funds Credited", f"Credit of Rs {amount:.2f} from {sender} received.", "TRANSFER", cursor=cursor)
+            except Exception as e_noti:
+                print(f"[ERROR] Failed to notify receiver: {e_noti}", flush=True)
+
+        # Phase 2: Update beneficiary transfer stats / auto-add recipient
+        if ttype in ['TRANSFER', 'QR_PAYMENT']:
+            try:
+                cursor.execute("SELECT id FROM beneficiaries WHERE user_id = %s AND beneficiary_username = %s", (sender_id, receiver))
+                b_row = cursor.fetchone()
+                if b_row:
+                    cursor.execute('''
+                    UPDATE beneficiaries 
+                    SET transfer_count = transfer_count + 1, total_transferred = total_transferred + %s 
+                    WHERE user_id = %s AND beneficiary_username = %s
+                    ''', (amount, sender_id, receiver))
+                else:
+                    cursor.execute('''
+                    INSERT INTO beneficiaries (user_id, beneficiary_username, nickname, transfer_count, total_transferred)
+                    VALUES (%s, %s, %s, 1, %s)
+                    ''', (sender_id, receiver, receiver, amount))
+            except Exception as e_b:
+                print(f"[ERROR] Failed to update beneficiary stats: {e_b}", flush=True)
         
         cursor.execute('''
         UPDATE transaction_otp_challenges 
@@ -2027,7 +2317,8 @@ def finalize_pending_transaction(token):
         return jsonify({
             "status": "success",
             "message": "Transfer completed successfully.",
-            "new_balance": sender_new_bal
+            "new_balance": sender_new_bal,
+            "transaction_id": tx_id
         })
         
     except Exception as e:
@@ -2107,7 +2398,7 @@ def explain_transaction():
         newbalanceDest = float(data.get('newbalanceDest', 0))
         
         df_pred = pd.DataFrame([{
-            'type': ttype,
+            'type': 'TRANSFER' if ttype == 'QR_PAYMENT' else ttype,
             'amount': amount,
             'oldbalanceOrig': oldbalanceOrig,
             'newbalanceOrig': newbalanceOrig,
@@ -2279,7 +2570,7 @@ def admin_review_action():
                 sender_new_bal = sender_bal - amount
             
             # Check receiver account type (CASH_OUT channel vs TRANSFER user)
-            if ttype == 'TRANSFER':
+            if ttype in ['TRANSFER', 'QR_PAYMENT']:
                 cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
                 receiver_row = cursor.fetchone()
                 receiver_bal = receiver_row['BAL'] if receiver_row else 0.0
@@ -2622,6 +2913,16 @@ def get_transaction_trace(tx_id):
         trace = json.loads(trace_str)
     except Exception as e:
         trace = {"error": str(e)}
+        
+    # Ensure new XAI fields are present
+    if 'confidence' not in trace:
+        trace['confidence'] = max(50, 100 - trace.get('risk_score', 0))
+    if 'feature_contributions' not in trace:
+        trace['feature_contributions'] = {"base_points": 100}
+    if 'triggered_policies' not in trace:
+        trace['triggered_policies'] = ["POL-000: Default Compliance Verification"]
+    if 'recommendation' not in trace:
+        trace['recommendation'] = "MFA verification enforced." 
         
     return jsonify({
         "status": "success",
@@ -3193,3 +3494,971 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
     socketio.run(app, host='0.0.0.0', port=port, debug=is_dev, use_reloader=False, allow_unsafe_werkzeug=is_dev)
+
+
+# ==========================================
+# PHASE 1 – QR PAYMENT SYSTEM ROUTE ENDPOINTS
+# ==========================================
+
+@app.route('/api/qr/token', methods=['GET'])
+def qr_get_token():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        from itsdangerous import URLSafeTimedSerializer
+        serializer = URLSafeTimedSerializer(app.secret_key, salt="qr-payment-salt")
+        token = serializer.dumps({"username": session['username']})
+        return jsonify({
+            "status": "success",
+            "qr_token": token,
+            "expires_in": 300
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/qr/scan', methods=['POST'])
+def qr_scan_token():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        data = request.get_json()
+        if not data or 'qr_token' not in data:
+            return jsonify({"status": "error", "message": "Missing qr_token"}), 400
+        
+        qr_token = data['qr_token'].strip()
+        from itsdangerous import URLSafeTimedSerializer
+        serializer = URLSafeTimedSerializer(app.secret_key, salt="qr-payment-salt")
+        try:
+            token_data = serializer.loads(qr_token, max_age=300)
+            receiver_username = token_data["username"]
+        except Exception:
+            return jsonify({"status": "error", "message": "Invalid or expired QR code token."}), 400
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT FIRSTNAME, LASTNAME FROM NEWBANK WHERE USERNAME = %s", (receiver_username,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return jsonify({"status": "error", "message": "Recipient not found."}), 404
+            
+        return jsonify({
+            "status": "success",
+            "username": receiver_username,
+            "firstname": row['FIRSTNAME'],
+            "lastname": row['LASTNAME']
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/qr/receipt/<int:tx_id>', methods=['GET'])
+def qr_payment_receipt(tx_id):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    try:
+        user_id = session['user_id']
+        username = session['username']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT * FROM NEWT 
+        WHERE ID = %s AND TTYPE = 'QR_PAYMENT' AND (SENDER = %s OR RECEIVER = %s)
+        ''', (tx_id, username, username))
+        tx = cursor.fetchone()
+        conn.close()
+        
+        if not tx:
+            return jsonify({"status": "error", "message": "QR payment receipt not found."}), 404
+            
+        from io import BytesIO
+        buffer = BytesIO()
+        
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.graphics.barcode import createBarcodeDrawing
+        
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        styles = getSampleStyleSheet()
+        
+        primary_color = colors.HexColor("#9b5de5")
+        text_color = colors.HexColor("#0f172a")
+        
+        story = []
+        
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=primary_color,
+            spaceAfter=20,
+            alignment=1
+        )
+        story.append(Paragraph("SMART BANKING - QR RECEIPT", title_style))
+        story.append(Spacer(1, 10))
+        
+        qr_code = createBarcodeDrawing('QR', value=f"https://smartbanking.com/verify/qr/{tx_id}", width=80, height=80)
+        
+        data = [
+            [Paragraph("<b>Transaction ID</b>", styles['Normal']), Paragraph(str(tx['id']), styles['Normal'])],
+            [Paragraph("<b>Timestamp</b>", styles['Normal']), Paragraph(str(tx['timestamp']), styles['Normal'])],
+            [Paragraph("<b>Sender</b>", styles['Normal']), Paragraph(str(tx['sender']), styles['Normal'])],
+            [Paragraph("<b>Recipient</b>", styles['Normal']), Paragraph(str(tx['receiver']), styles['Normal'])],
+            [Paragraph("<b>Amount</b>", styles['Normal']), Paragraph(f"INR {tx['amount']:,.2f}", styles['Normal'])],
+            [Paragraph("<b>Status</b>", styles['Normal']), Paragraph(str(tx['status']), styles['Normal'])],
+            [Paragraph("<b>Verification QR</b>", styles['Normal']), qr_code]
+        ]
+        
+        t = Table(data, colWidths=[200, 300])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
+            ('TEXTCOLOR', (0, 0), (-1, -1), text_color),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f8fafc")),
+        ]))
+        
+        story.append(t)
+        doc.build(story)
+        
+        buffer.seek(0)
+        from flask import Response
+        return Response(
+            buffer.getvalue(),
+            mimetype='application/pdf',
+            headers={"Content-Disposition": f"attachment;filename=QR_Receipt_{tx_id}.pdf"}
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PHASE 2 – BENEFICIARY MANAGEMENT ENDPOINTS
+# ==========================================
+
+@app.route('/api/beneficiaries', methods=['GET'])
+def get_beneficiaries():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        search = request.args.get('search', '').strip()
+        sort_by = request.args.get('sort', 'nickname').strip()
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        offset = (page - 1) * per_page
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        query = "SELECT * FROM beneficiaries WHERE user_id = %s"
+        params = [user_id]
+        
+        if search:
+            query += " AND (nickname LIKE %s OR beneficiary_username LIKE %s)"
+            params.extend([f"%{search}%", f"%{search}%"])
+            
+        if sort_by == 'favorite':
+            query += " ORDER BY is_favorite DESC, nickname ASC"
+        elif sort_by == 'stats':
+            query += " ORDER BY total_transferred DESC"
+        else:
+            query += " ORDER BY nickname ASC"
+            
+        query += " LIMIT %s OFFSET %s"
+        params.extend([per_page, offset])
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        # Total count for pagination
+        count_query = "SELECT COUNT(*) as total FROM beneficiaries WHERE user_id = %s"
+        count_params = [user_id]
+        if search:
+            count_query += " AND (nickname LIKE %s OR beneficiary_username LIKE %s)"
+            count_params.extend([f"%{search}%", f"%{search}%"])
+        cursor.execute(count_query, count_params)
+        total_rows = cursor.fetchone()
+        total_count = total_rows['total'] if total_rows else 0
+        
+        conn.close()
+        
+        list_b = []
+        for r in rows:
+            list_b.append({
+                "id": r['id'],
+                "beneficiary_username": r['beneficiary_username'],
+                "nickname": r['nickname'],
+                "is_favorite": bool(r['is_favorite']),
+                "transfer_count": r['transfer_count'],
+                "total_transferred": r['total_transferred']
+            })
+            
+        return jsonify({
+            "status": "success",
+            "beneficiaries": list_b,
+            "total": total_count,
+            "page": page,
+            "per_page": per_page
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/beneficiaries', methods=['POST'])
+def add_beneficiary():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        data = request.get_json()
+        if not data or 'username' not in data:
+            return jsonify({"status": "error", "message": "Username is required."}), 400
+            
+        user_id = session['user_id']
+        current_username = session['username']
+        b_username = data['username'].strip()
+        nickname = data.get('nickname', b_username).strip()
+        
+        if b_username.lower() == current_username.lower():
+            return jsonify({"status": "error", "message": "Cannot add yourself as a beneficiary."}), 400
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Verify user exists
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = %s", (b_username,))
+        rec_row = cursor.fetchone()
+        if not rec_row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Recipient username not found."}), 404
+            
+        # Prevent duplicates
+        cursor.execute("SELECT id FROM beneficiaries WHERE user_id = %s AND beneficiary_username = %s", (user_id, b_username))
+        dup_row = cursor.fetchone()
+        if dup_row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Beneficiary already exists."}), 400
+            
+        cursor.execute('''
+        INSERT INTO beneficiaries (user_id, beneficiary_username, nickname)
+        VALUES (%s, %s, %s)
+        ''', (user_id, b_username, nickname))
+        
+        # Write to audit trail
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'BENEFICIARY_ADDED', 'LOW', %s)
+        ''', (user_id, json.dumps({"beneficiary": b_username, "nickname": nickname})))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"status": "success", "message": "Beneficiary added successfully."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/beneficiaries/<int:b_id>', methods=['PUT'])
+def update_beneficiary(b_id):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        data = request.get_json()
+        nickname = data.get('nickname', '').strip()
+        if not nickname:
+            return jsonify({"status": "error", "message": "Nickname is required."}), 400
+            
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Validate ownership
+        cursor.execute("SELECT beneficiary_username FROM beneficiaries WHERE id = %s AND user_id = %s", (b_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Beneficiary not found or unauthorized."}), 404
+            
+        cursor.execute("UPDATE beneficiaries SET nickname = %s WHERE id = %s", (nickname, b_id))
+        
+        # Audit
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'BENEFICIARY_UPDATED', 'LOW', %s)
+        ''', (user_id, json.dumps({"beneficiary": row['beneficiary_username'], "new_nickname": nickname})))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Beneficiary updated successfully."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/beneficiaries/<int:b_id>', methods=['DELETE'])
+def delete_beneficiary(b_id):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Validate ownership
+        cursor.execute("SELECT beneficiary_username FROM beneficiaries WHERE id = %s AND user_id = %s", (b_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Beneficiary not found or unauthorized."}), 404
+            
+        cursor.execute("DELETE FROM beneficiaries WHERE id = %s", (b_id,))
+        
+        # Audit
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'BENEFICIARY_REMOVED', 'LOW', %s)
+        ''', (user_id, json.dumps({"beneficiary": row['beneficiary_username']})))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Beneficiary removed successfully."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/beneficiaries/<int:b_id>/favorite', methods=['POST'])
+def favorite_beneficiary(b_id):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Validate ownership
+        cursor.execute("SELECT beneficiary_username, is_favorite FROM beneficiaries WHERE id = %s AND user_id = %s", (b_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Beneficiary not found or unauthorized."}), 404
+            
+        new_fav = 1 - row['is_favorite']
+        cursor.execute("UPDATE beneficiaries SET is_favorite = %s WHERE id = %s", (new_fav, b_id))
+        
+        # Audit
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'BENEFICIARY_FAVORITED', 'LOW', %s)
+        ''', (user_id, json.dumps({"beneficiary": row['beneficiary_username'], "is_favorite": bool(new_fav)})))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Favorite status updated.", "is_favorite": bool(new_fav)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PHASE 3 – LOGIN SECURITY CENTER ENDPOINTS
+# ==========================================
+
+@app.route('/api/security/sessions', methods=['GET'])
+def get_security_sessions():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        offset = (page - 1) * per_page
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT * FROM login_history 
+        WHERE user_id = %s 
+        ORDER BY login_time DESC 
+        LIMIT %s OFFSET %s
+        ''', (user_id, per_page, offset))
+        rows = cursor.fetchall()
+        
+        cursor.execute("SELECT COUNT(*) as total FROM login_history WHERE user_id = %s", (user_id,))
+        count_row = cursor.fetchone()
+        total = count_row['total'] if count_row else 0
+        conn.close()
+        
+        sessions = []
+        for r in rows:
+            sessions.append({
+                "id": r['id'],
+                "session_id": r['session_id'],
+                "browser": r['browser'],
+                "os": r['os'],
+                "ip_address": r['ip_address'],
+                "device_type": r['device_type'],
+                "is_trusted": bool(r['is_trusted']),
+                "login_time": r['login_time'],
+                "last_activity": r['last_activity'],
+                "status": r['status'],
+                "is_current": r['session_id'] == session.get('session_id')
+            })
+            
+        return jsonify({
+            "status": "success",
+            "sessions": sessions,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/security/sessions/revoke', methods=['POST'])
+def revoke_session():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        data = request.get_json()
+        target_sid = data.get('session_id', '').strip()
+        if not target_sid:
+            return jsonify({"status": "error", "message": "session_id is required."}), 400
+            
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Verify ownership
+        cursor.execute("SELECT user_id, status FROM login_history WHERE session_id = %s", (target_sid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Session not found."}), 404
+            
+        if row['user_id'] != user_id:
+            conn.close()
+            return jsonify({"status": "error", "message": "Access denied."}), 403
+            
+        cursor.execute("UPDATE login_history SET status = 'REVOKED' WHERE session_id = %s", (target_sid,))
+        
+        # Audit
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'SESSION_REVOKED', 'LOW', %s)
+        ''', (user_id, json.dumps({"session_id": target_sid})))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Session successfully revoked."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/security/sessions/revoke-others', methods=['POST'])
+def revoke_other_sessions():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        current_sid = session.get('session_id')
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE login_history 
+        SET status = 'REVOKED' 
+        WHERE user_id = %s AND session_id != %s AND status = 'ACTIVE'
+        ''', (user_id, current_sid))
+        
+        # Audit
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'ALL_OTHER_SESSIONS_REVOKED', 'LOW', '{}')
+        ''', (user_id,))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "All other sessions successfully revoked."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/security/devices/trust', methods=['POST'])
+def toggle_device_trust():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        data = request.get_json()
+        fingerprint = data.get('device_fingerprint', '').strip()
+        trust_status = int(data.get('is_trusted', 0))
+        
+        if not fingerprint:
+            return jsonify({"status": "error", "message": "device_fingerprint is required."}), 400
+            
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        UPDATE login_history 
+        SET is_trusted = %s 
+        WHERE user_id = %s AND device_fingerprint = %s
+        ''', (trust_status, user_id, fingerprint))
+        
+        # Audit
+        cursor.execute('''
+        INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+        VALUES (%s, 'DEVICE_TRUST_TOGGLED', 'LOW', %s)
+        ''', (user_id, json.dumps({"fingerprint": fingerprint, "is_trusted": bool(trust_status)})))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Device trust level updated successfully."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PHASE 4 – EXPLAINABLE AI (XAI) ENDPOINTS
+# ==========================================
+
+@app.route('/api/xai/explain/<int:tx_id>', methods=['GET'])
+def get_xai_explanation(tx_id):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        username = session['username']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Verify transaction ownership
+        cursor.execute("SELECT * FROM NEWT WHERE ID = %s AND (SENDER = %s OR RECEIVER = %s)", (tx_id, username, username))
+        tx = cursor.fetchone()
+        conn.close()
+        
+        if not tx:
+            return jsonify({"status": "error", "message": "Transaction not found."}), 404
+            
+        trace_str = tx['decision_trace']
+        try:
+            trace = json.loads(trace_str)
+        except Exception:
+            # Construct legacy fallback trace
+            trace = {
+                "risk_score": 10,
+                "risk_level": "LOW",
+                "reasons": ["Legacy Transaction: Decision trace reconstructed."],
+                "breakdown": {"base_points": 10},
+                "ml_probability": 0.0,
+                "feature_importances": {},
+                "auth_required": [],
+                "auth_completed": [],
+                "confidence": 95,
+                "feature_contributions": {"base_points": 100},
+                "triggered_policies": ["POL-000: Standard Low Risk Profile"],
+                "recommendation": "Legacy transaction processed under default parameters."
+            }
+            
+        # Ensure new fields are present even if partial trace
+        if 'confidence' not in trace:
+            trace['confidence'] = max(50, 100 - trace.get('risk_score', 0))
+        if 'feature_contributions' not in trace:
+            trace['feature_contributions'] = {"base_points": 100}
+        if 'triggered_policies' not in trace:
+            trace['triggered_policies'] = ["POL-000: Policy Mapping Unavailable"]
+        if 'recommendation' not in trace:
+            trace['recommendation'] = "MFA verified successfully."
+            
+        return jsonify({
+            "status": "success",
+            "explanation": trace
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PHASE 5 – ENTERPRISE ADMIN ANALYTICS & EXPORTS
+# ==========================================
+
+@app.route('/api/admin/analytics/stats', methods=['GET'])
+def get_admin_analytics_stats():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized Access"}), 401
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM NEWBANK")
+        total_users = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT SUM(BAL) as sum_bal FROM NEWBANK")
+        total_bal = cursor.fetchone()['sum_bal'] or 0.0
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM NEWT")
+        total_txs = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT SUM(AMOUNT) as sum_amt FROM NEWT")
+        total_volume = cursor.fetchone()['sum_amt'] or 0.0
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM NEWT WHERE IS_FRAUD_PREDICTED = 1")
+        total_frauds = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM pending_transactions WHERE status = 'PENDING'")
+        total_pending = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM biometric_security_events WHERE event_type LIKE '%FAILED%' OR event_type LIKE '%MISMATCH%'")
+        otp_failures = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM login_attempts")
+        login_failures = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM NEWT WHERE TTYPE = 'QR_PAYMENT'")
+        qr_count = cursor.fetchone()['cnt']
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM login_history WHERE status = 'ACTIVE'")
+        active_sessions = cursor.fetchone()['cnt']
+        
+        conn.close()
+        return jsonify({
+            "status": "success",
+            "stats": {
+                "total_users": total_users,
+                "total_balance": total_bal,
+                "total_transactions": total_txs,
+                "total_volume": total_volume,
+                "total_frauds": total_frauds,
+                "total_pending": total_pending,
+                "otp_failures": otp_failures,
+                "login_failures": login_failures,
+                "qr_count": qr_count,
+                "active_sessions": active_sessions
+            }
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/admin/reports/csv', methods=['GET'])
+def export_ledger_csv():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized Access"}), 401
+    try:
+        import io
+        import csv
+        from flask import Response
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM NEWT ORDER BY TIMESTAMP DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Transaction ID", "Sender", "Receiver", "Type", "Amount", "Status", "Timestamp", "Fraud Predicted"])
+        
+        for r in rows:
+            writer.writerow([
+                r['ID'], r['SENDER'], r['RECEIVER'], r['TTYPE'], r['AMOUNT'],
+                r['STATUS'], r['TIMESTAMP'], r['IS_FRAUD_PREDICTED']
+            ])
+            
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-disposition": "attachment; filename=ledger_report.csv"}
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/admin/reports/pdf', methods=['GET'])
+def export_ledger_pdf():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized Access"}), 401
+    try:
+        import io
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from flask import send_file
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM NEWT ORDER BY TIMESTAMP DESC LIMIT 100")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+        story = []
+        
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Heading1'],
+            fontSize=22,
+            textColor=colors.HexColor('#1e1b4b'),
+            spaceAfter=15
+        )
+        subtitle_style = ParagraphStyle(
+            'SubtitleStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor=colors.HexColor('#475569'),
+            spaceAfter=25
+        )
+        
+        story.append(Paragraph("Smart Banking Enterprise System", title_style))
+        story.append(Paragraph("Master Audit Report - Generated by Auditor", subtitle_style))
+        story.append(Spacer(1, 10))
+        
+        # Table data
+        data = [["ID", "Sender", "Receiver", "Type", "Amount", "Status", "Timestamp"]]
+        for r in rows:
+            data.append([
+                str(r['ID']),
+                r['SENDER'],
+                r['RECEIVER'],
+                r['TTYPE'],
+                f"Rs {r['AMOUNT']:.2f}",
+                r['STATUS'],
+                r['TIMESTAMP']
+            ])
+            
+        t = Table(data, colWidths=[40, 80, 80, 80, 100, 70, 100])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1e1b4b')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), 10),
+            ('BOTTOMPADDING', (0,0), (-1,0), 8),
+            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#f8fafc')),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
+            ('FONTSIZE', (0,1), (-1,-1), 8),
+        ]))
+        
+        story.append(t)
+        doc.build(story)
+        buffer.seek(0)
+        
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name="ledger_audit_report.pdf",
+            mimetype="application/pdf"
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PHASE 6 – NOTIFICATION CENTER ENDPOINTS
+# ==========================================
+
+@app.route('/api/notifications', methods=['GET'])
+def get_notifications():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        unread_only = request.args.get('unread_only', 'false').lower() == 'true'
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if unread_only:
+            cursor.execute('''
+            SELECT * FROM notifications 
+            WHERE user_id = %s AND is_read = 0 
+            ORDER BY created_at DESC
+            ''', (user_id,))
+        else:
+            cursor.execute('''
+            SELECT * FROM notifications 
+            WHERE user_id = %s 
+            ORDER BY created_at DESC 
+            LIMIT 50
+            ''', (user_id,))
+            
+        rows = cursor.fetchall()
+        
+        cursor.execute("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = %s AND is_read = 0", (user_id,))
+        unread_cnt = cursor.fetchone()['cnt']
+        
+        conn.close()
+        
+        notifs = []
+        for r in rows:
+            notifs.append({
+                "id": r['id'],
+                "title": r['title'],
+                "message": r['message'],
+                "type": r['type'],
+                "is_read": bool(r['is_read']),
+                "created_at": r['created_at']
+            })
+            
+        return jsonify({
+            "status": "success",
+            "notifications": notifs,
+            "unread_count": unread_cnt
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/notifications/read', methods=['POST'])
+def mark_all_notifications_read():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE notifications SET is_read = 1 WHERE user_id = %s", (user_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "All notifications marked as read."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/notifications/<int:nid>/read', methods=['POST'])
+def mark_single_notification_read(nid):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Verify ownership
+        cursor.execute("SELECT user_id FROM notifications WHERE id = %s", (nid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Notification not found."}), 404
+        if row['user_id'] != user_id:
+            conn.close()
+            return jsonify({"status": "error", "message": "Access denied."}), 403
+            
+        cursor.execute("UPDATE notifications SET is_read = 1 WHERE id = %s", (nid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Notification marked as read."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/notifications/<int:nid>', methods=['DELETE'])
+def delete_notification(nid):
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Verify ownership
+        cursor.execute("SELECT user_id FROM notifications WHERE id = %s", (nid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": "Notification not found."}), 404
+        if row['user_id'] != user_id:
+            conn.close()
+            return jsonify({"status": "error", "message": "Access denied."}), 403
+            
+        cursor.execute("DELETE FROM notifications WHERE id = %s", (nid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Notification deleted."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PHASE 7 – DYNAMIC DASHBOARD METRICS API
+# ==========================================
+
+@app.route('/api/dashboard/metrics', methods=['GET'])
+def get_dashboard_metrics():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        user_id = session['user_id']
+        username = session['username']
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Bank Balance
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE ID = %s", (user_id,))
+        bank_row = cursor.fetchone()
+        bank_balance = bank_row['BAL'] if bank_row else 0.0
+        
+        # 2. Wallet Balance
+        # Check if smart_wallet table exists
+        wallet_balance = 0.0
+        try:
+            cursor.execute("SELECT balance FROM smart_wallet WHERE user_id = %s", (user_id,))
+            wallet_row = cursor.fetchone()
+            if wallet_row:
+                wallet_balance = wallet_row['balance']
+        except Exception:
+            pass
+            
+        # 3. Monthly Spends (Last 30 days)
+        cursor.execute("SELECT AMOUNT, TIMESTAMP FROM NEWT WHERE SENDER = %s AND STATUS = 'APPROVED'", (username,))
+        tx_rows = cursor.fetchall()
+        
+        import datetime
+        thirty_days_ago = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+        monthly_spends = 0.0
+        
+        for tx in tx_rows:
+            try:
+                tx_time = datetime.datetime.strptime(tx['TIMESTAMP'], "%Y-%m-%d %H:%M:%S")
+                if tx_time >= thirty_days_ago:
+                    monthly_spends += tx['AMOUNT']
+            except Exception:
+                pass
+                
+        # 4. Security Score calculation
+        security_score = 40 # Base score
+        
+        # Face Biometrics enrolled (+30%)
+        cursor.execute("SELECT COUNT(*) as cnt FROM face_enrollments WHERE user_id = %s", (user_id,))
+        has_face = cursor.fetchone()['cnt'] > 0
+        if has_face:
+            security_score += 30
+            
+        # Trusted device (+15%)
+        cursor.execute("SELECT COUNT(*) as cnt FROM login_history WHERE user_id = %s AND is_trusted = 1", (user_id,))
+        has_trusted = cursor.fetchone()['cnt'] > 0
+        if has_trusted:
+            security_score += 15
+            
+        # No biometric failure events (+15%)
+        cursor.execute('''
+        SELECT COUNT(*) as cnt FROM biometric_security_events 
+        WHERE user_id = %s AND (event_type LIKE '%%FAILED%%' OR event_type LIKE '%%MISMATCH%%')
+        ''', (user_id,))
+        failures_count = cursor.fetchone()['cnt']
+        if failures_count == 0:
+            security_score += 15
+        else:
+            security_score = max(10, security_score - (failures_count * 10))
+            
+        conn.close()
+        return jsonify({
+            "status": "success",
+            "metrics": {
+                "bank_balance": bank_balance,
+                "wallet_balance": wallet_balance,
+                "monthly_spends": monthly_spends,
+                "security_score": min(100, security_score)
+            }
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500

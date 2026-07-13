@@ -4,7 +4,7 @@ import time
 import os
 import sqlite3
 from unittest.mock import patch
-from app import app, DB_PATH, MODEL_PATH
+from app import app, DB_PATH, MODEL_PATH, get_db_connection
 
 class BankAppTestCase(unittest.TestCase):
     
@@ -1426,5 +1426,560 @@ class BankAppTestCase(unittest.TestCase):
         self.assertIn("Duplicate", data['message'])
 
 
+
+    def test_qr_token_generation(self):
+        # Register and login
+        self.client.post('/api/register', json={
+            "username": "qr_sender", "firstname": "QR", "lastname": "Sender",
+            "email": "qr_send@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd"})
+        
+        res = self.client.get('/api/qr/token')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertTrue('qr_token' in data)
+
+    def test_qr_scan_success(self):
+        # Register sender
+        self.client.post('/api/register', json={
+            "username": "qr_sender", "firstname": "QR", "lastname": "Sender",
+            "email": "qr_send@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        # Register and login recipient
+        self.client.post('/api/register', json={
+            "username": "qr_rec", "firstname": "QR", "lastname": "Rec",
+            "email": "qr_rec@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        
+        # Generate token
+        self.client.post('/api/login', json={"username": "qr_rec", "password": "pwd"})
+        res_tok = self.client.get('/api/qr/token')
+        data_tok = json.loads(res_tok.data)
+        token = data_tok['qr_token']
+        
+        # Login sender
+        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd"})
+        
+        # Scan token
+        res_scan = self.client.post('/api/qr/scan', json={"qr_token": token})
+        self.assertEqual(res_scan.status_code, 200)
+        data_scan = json.loads(res_scan.data)
+        self.assertEqual(data_scan['status'], 'success')
+        self.assertEqual(data_scan['username'], 'qr_rec')
+        self.assertEqual(data_scan['firstname'], 'QR')
+
+    def test_qr_scan_invalid_token(self):
+        # Register sender
+        self.client.post('/api/register', json={
+            "username": "qr_sender", "firstname": "QR", "lastname": "Sender",
+            "email": "qr_send@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd"})
+        res = self.client.post('/api/qr/scan', json={"qr_token": "invalid-token-value"})
+        self.assertEqual(res.status_code, 400)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'error')
+
+    def test_qr_payment_success(self):
+        # Register sender and receiver
+        self.client.post('/api/register', json={
+            "username": "qr_send2", "firstname": "QR", "lastname": "Send2",
+            "email": "qr_s2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "qr_rec2", "firstname": "QR", "lastname": "Rec2",
+            "email": "qr_r2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        
+        # Generate token for receiver
+        self.client.post('/api/login', json={"username": "qr_rec2", "password": "pwd"})
+        res_tok = self.client.get('/api/qr/token')
+        token = json.loads(res_tok.data)['qr_token']
+        
+        # Login sender
+        self.client.post('/api/login', json={"username": "qr_send2", "password": "pwd"})
+        
+        # Initiate payment
+        res_pay = self.client.post('/api/transfer/initiate', json={
+            "receiver": "qr_rec2",
+            "amount": 1000.0,
+            "type": "QR_PAYMENT",
+            "qr_token": token,
+            "remarks": "Lunch payment"
+        })
+        self.assertEqual(res_pay.status_code, 200)
+        data_pay = json.loads(res_pay.data)
+        self.assertEqual(data_pay['status'], 'success')
+        
+        # Check transaction ID exists and verify receipt download
+        tx_id = data_pay['transaction_id']
+        res_rec = self.client.get(f'/api/qr/receipt/{tx_id}')
+        self.assertEqual(res_rec.status_code, 200)
+        self.assertEqual(res_rec.headers['Content-Type'], 'application/pdf')
+
+    def test_qr_payment_invalid_token(self):
+        # Register sender and receiver
+        self.client.post('/api/register', json={
+            "username": "qr_send2", "firstname": "QR", "lastname": "Send2",
+            "email": "qr_s2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "qr_rec2", "firstname": "QR", "lastname": "Rec2",
+            "email": "qr_r2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "qr_send2", "password": "pwd"})
+        # Try paying with incorrect token
+        res_pay = self.client.post('/api/transfer/initiate', json={
+            "receiver": "qr_rec2",
+            "amount": 1000.0,
+            "type": "QR_PAYMENT",
+            "qr_token": "some-other-token-string"
+        })
+        self.assertEqual(res_pay.status_code, 400)
+        data = json.loads(res_pay.data)
+        self.assertEqual(data['status'], 'error')
+
+
+
+    def test_add_beneficiary_success(self):
+        # Register recipient
+        self.client.post('/api/register', json={
+            "username": "b_rec1", "firstname": "B", "lastname": "Rec1",
+            "email": "b1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        # Register and login user
+        self.client.post('/api/register', json={
+            "username": "b_user1", "firstname": "B", "lastname": "User1",
+            "email": "bu1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "b_user1", "password": "pwd"})
+        
+        res = self.client.post('/api/beneficiaries', json={"username": "b_rec1", "nickname": "My Friend"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+
+    def test_add_beneficiary_duplicate(self):
+        self.client.post('/api/register', json={
+            "username": "b_rec2", "firstname": "B", "lastname": "Rec2",
+            "email": "b2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "b_user2", "firstname": "B", "lastname": "User2",
+            "email": "bu2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "b_user2", "password": "pwd"})
+        
+        # Add once
+        self.client.post('/api/beneficiaries', json={"username": "b_rec2", "nickname": "Friend"})
+        # Add twice
+        res = self.client.post('/api/beneficiaries', json={"username": "b_rec2", "nickname": "Friend"})
+        self.assertEqual(res.status_code, 400)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'error')
+
+    def test_add_beneficiary_self(self):
+        self.client.post('/api/register', json={
+            "username": "b_user3", "firstname": "B", "lastname": "User3",
+            "email": "bu3@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "b_user3", "password": "pwd"})
+        res = self.client.post('/api/beneficiaries', json={"username": "b_user3"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_get_beneficiaries(self):
+        self.client.post('/api/register', json={
+            "username": "b_rec4", "firstname": "B", "lastname": "Rec4",
+            "email": "b4@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "b_user4", "firstname": "B", "lastname": "User4",
+            "email": "bu4@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "b_user4", "password": "pwd"})
+        
+        # Add beneficiary
+        self.client.post('/api/beneficiaries', json={"username": "b_rec4", "nickname": "Bob"})
+        
+        res = self.client.get('/api/beneficiaries?search=Bob')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertEqual(len(data['beneficiaries']), 1)
+        self.assertEqual(data['beneficiaries'][0]['nickname'], 'Bob')
+
+    def test_favorite_beneficiary(self):
+        self.client.post('/api/register', json={
+            "username": "b_rec5", "firstname": "B", "lastname": "Rec5",
+            "email": "b5@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "b_user5", "firstname": "B", "lastname": "User5",
+            "email": "bu5@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "b_user5", "password": "pwd"})
+        
+        self.client.post('/api/beneficiaries', json={"username": "b_rec5", "nickname": "Alice"})
+        
+        # Fetch list to get ID
+        res_list = self.client.get('/api/beneficiaries')
+        b_id = json.loads(res_list.data)['beneficiaries'][0]['id']
+        
+        # Favorite
+        res_fav = self.client.post(f'/api/beneficiaries/{b_id}/favorite')
+        self.assertEqual(res_fav.status_code, 200)
+        data_fav = json.loads(res_fav.data)
+        self.assertEqual(data_fav['is_favorite'], True)
+
+    def test_transfer_updates_beneficiary_stats(self):
+        # Register users
+        self.client.post('/api/register', json={
+            "username": "b_rec6", "firstname": "B", "lastname": "Rec6",
+            "email": "b6@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "b_user6", "firstname": "B", "lastname": "User6",
+            "email": "bu6@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "b_user6", "password": "pwd"})
+        
+        # Add beneficiary
+        self.client.post('/api/beneficiaries', json={"username": "b_rec6", "nickname": "Charlie"})
+        
+        # Transfer money
+        self.client.post('/api/transfer/initiate', json={
+            "receiver": "b_rec6",
+            "amount": 2000.0,
+            "type": "TRANSFER",
+            "remarks": "Gift"
+        })
+        
+        # Check stats updated
+        res_list = self.client.get('/api/beneficiaries')
+        b = json.loads(res_list.data)['beneficiaries'][0]
+        self.assertEqual(b['transfer_count'], 1)
+        self.assertEqual(b['total_transferred'], 2000.0)
+
+
+
+    def test_session_logging_on_login(self):
+        self.client.post('/api/register', json={
+            "username": "s_user1", "firstname": "S", "lastname": "User1",
+            "email": "s1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "s_user1", "password": "pwd"})
+        
+        # Check active session list
+        res = self.client.get('/api/security/sessions')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertEqual(data['total'], 1)
+        self.assertEqual(data['sessions'][0]['status'], 'ACTIVE')
+
+    def test_session_revocation(self):
+        self.client.post('/api/register', json={
+            "username": "s_user2", "firstname": "S", "lastname": "User2",
+            "email": "s2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "s_user2", "password": "pwd"})
+        
+        res = self.client.get('/api/security/sessions')
+        sessions = json.loads(res.data)['sessions']
+        sid = sessions[0]['session_id']
+        
+        # Revoke the session
+        res_rev = self.client.post('/api/security/sessions/revoke', json={"session_id": sid})
+        self.assertEqual(res_rev.status_code, 200)
+        
+        # Try getting session list again (should fail with 401 because session is revoked!)
+        res_list = self.client.get('/api/security/sessions')
+        self.assertEqual(res_list.status_code, 401)
+
+    def test_revoke_others(self):
+        self.client.post('/api/register', json={
+            "username": "s_user3", "firstname": "S", "lastname": "User3",
+            "email": "s3@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        # Simulate active session 1
+        self.client.post('/api/login', json={"username": "s_user3", "password": "pwd"})
+        
+        # Simulate active session 2 (by logging in again, which creates a new session_id)
+        # Note: self.client preserves cookies, but posting login clears previous and starts new.
+        self.client.post('/api/login', json={"username": "s_user3", "password": "pwd"})
+        
+        # There should be 2 login history records in DB for this user
+        res = self.client.get('/api/security/sessions')
+        data = json.loads(res.data)
+        self.assertEqual(data['total'], 2)
+        
+        # Revoke others
+        res_oth = self.client.post('/api/security/sessions/revoke-others')
+        self.assertEqual(res_oth.status_code, 200)
+        
+        # Re-verify session list
+        res_chk = self.client.get('/api/security/sessions')
+        data_chk = json.loads(res_chk.data)
+        # 1 should be active (current), 1 revoked
+        active_count = sum(1 for s in data_chk['sessions'] if s['status'] == 'ACTIVE')
+        revoked_count = sum(1 for s in data_chk['sessions'] if s['status'] == 'REVOKED')
+        self.assertEqual(active_count, 1)
+        self.assertEqual(revoked_count, 1)
+
+    def test_device_trust_toggle(self):
+        self.client.post('/api/register', json={
+            "username": "s_user4", "firstname": "S", "lastname": "User4",
+            "email": "s4@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "s_user4", "password": "pwd"})
+        
+        res = self.client.post('/api/security/devices/trust', json={
+            "device_fingerprint": "default_fingerprint",
+            "is_trusted": 1
+        })
+        self.assertEqual(res.status_code, 200)
+        
+        res_list = self.client.get('/api/security/sessions')
+        sessions = json.loads(res_list.data)['sessions']
+        self.assertEqual(sessions[0]['is_trusted'], True)
+
+
+
+    def test_xai_enrichment_on_transfer(self):
+        self.client.post('/api/register', json={
+            "username": "x_user1", "firstname": "X", "lastname": "User1",
+            "email": "x1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "x_rec1", "firstname": "X", "lastname": "Rec1",
+            "email": "xr1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "x_user1", "password": "pwd"})
+        
+        # Trigger medium risk to get SMS OTP challenge with XAI trace
+        self.client.post('/api/transfer/initiate', json={
+            "receiver": "x_rec1",
+            "amount": 25000.0,
+            "type": "TRANSFER",
+            "remarks": "Test XAI"
+        })
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM pending_transactions ORDER BY expires_at DESC LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        
+        trace = json.loads(row['decision_trace'])
+        self.assertIn('confidence', trace)
+        self.assertIn('triggered_policies', trace)
+        self.assertIn('recommendation', trace)
+        self.assertIn('feature_contributions', trace)
+
+    def test_xai_explain_api_route(self):
+        self.client.post('/api/register', json={
+            "username": "x_user2", "firstname": "X", "lastname": "User2",
+            "email": "x2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/register', json={
+            "username": "x_rec2", "firstname": "X", "lastname": "Rec2",
+            "email": "xr2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "x_user2", "password": "pwd"})
+        
+        # Initiate a low-risk transfer
+        self.client.post('/api/transfer/initiate', json={
+            "receiver": "x_rec2",
+            "amount": 50.0,
+            "type": "TRANSFER",
+            "remarks": "Low risk"
+        })
+        
+        # Get transaction ID
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ID FROM NEWT WHERE SENDER = 'x_user2' ORDER BY TIMESTAMP DESC LIMIT 1")
+        tx_row = cursor.fetchone()
+        conn.close()
+        
+        tx_id = tx_row['ID']
+        
+        # Request trace
+        res = self.client.get(f'/api/transaction/{tx_id}/trace')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertIn('confidence', data['trace'])
+        self.assertIn('triggered_policies', data['trace'])
+        self.assertIn('recommendation', data['trace'])
+
+
+
+    def test_admin_analytics_stats_route(self):
+        # Login as auditor admin
+        self.client.post('/api/login', json={"username": "admin", "password": "adminpass"})
+        
+        res = self.client.get('/api/admin/analytics/stats')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertIn('total_users', data['stats'])
+        self.assertIn('total_transactions', data['stats'])
+        self.assertIn('total_frauds', data['stats'])
+        self.assertIn('otp_failures', data['stats'])
+        self.assertIn('active_sessions', data['stats'])
+
+    def test_export_ledger_csv(self):
+        # Login as admin
+        self.client.post('/api/login', json={"username": "admin", "password": "adminpass"})
+        
+        res = self.client.get('/api/admin/reports/csv')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.mimetype, 'text/csv')
+        self.assertIn(b"Transaction ID", res.data)
+        self.assertIn(b"Sender", res.data)
+
+    def test_export_ledger_pdf(self):
+        # Login as admin
+        self.client.post('/api/login', json={"username": "admin", "password": "adminpass"})
+        
+        res = self.client.get('/api/admin/reports/pdf')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.mimetype, 'application/pdf')
+        # Check PDF header bytes
+        self.assertTrue(res.data.startswith(b"%PDF"))
+
+
+
+    def test_notification_on_login(self):
+        self.client.post('/api/register', json={
+            "username": "n_user1", "firstname": "N", "lastname": "User1",
+            "email": "n1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "n_user1", "password": "pwd"})
+        
+        res = self.client.get('/api/notifications')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertEqual(data['unread_count'], 1)
+        self.assertEqual(data['notifications'][0]['title'], 'New Login Session')
+
+    def test_mark_all_read(self):
+        self.client.post('/api/register', json={
+            "username": "n_user2", "firstname": "N", "lastname": "User2",
+            "email": "n2@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "n_user2", "password": "pwd"})
+        
+        # Mark all read
+        res_read = self.client.post('/api/notifications/read')
+        self.assertEqual(res_read.status_code, 200)
+        
+        # Check unread count
+        res = self.client.get('/api/notifications')
+        data = json.loads(res.data)
+        self.assertEqual(data['unread_count'], 0)
+        self.assertEqual(data['notifications'][0]['is_read'], True)
+
+    def test_mark_single_read(self):
+        self.client.post('/api/register', json={
+            "username": "n_user3", "firstname": "N", "lastname": "User3",
+            "email": "n3@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "n_user3", "password": "pwd"})
+        
+        # Get notifications list to find ID
+        res = self.client.get('/api/notifications')
+        nid = json.loads(res.data)['notifications'][0]['id']
+        
+        # Mark read
+        res_read = self.client.post(f'/api/notifications/{nid}/read')
+        self.assertEqual(res_read.status_code, 200)
+        
+        # Re-check list
+        res_check = self.client.get('/api/notifications')
+        self.assertEqual(json.loads(res_check.data)['notifications'][0]['is_read'], True)
+
+    def test_delete_notification(self):
+        self.client.post('/api/register', json={
+            "username": "n_user4", "firstname": "N", "lastname": "User4",
+            "email": "n4@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "n_user4", "password": "pwd"})
+        
+        res = self.client.get('/api/notifications')
+        nid = json.loads(res.data)['notifications'][0]['id']
+        
+        # Delete notification
+        res_del = self.client.delete(f'/api/notifications/{nid}')
+        self.assertEqual(res_del.status_code, 200)
+        
+        # Re-check list
+        res_check = self.client.get('/api/notifications')
+        self.assertEqual(len(json.loads(res_check.data)['notifications']), 0)
+
+
+
+    def test_dashboard_metrics_route(self):
+        self.client.post('/api/register', json={
+            "username": "m_user1", "firstname": "M", "lastname": "User1",
+            "email": "m1@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "m_user1", "password": "pwd"})
+        
+        res = self.client.get('/api/dashboard/metrics')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertIn('bank_balance', data['metrics'])
+        self.assertIn('wallet_balance', data['metrics'])
+        self.assertIn('monthly_spends', data['metrics'])
+        
+        score = data['metrics']['security_score']
+        self.assertTrue(0 <= score <= 100)
+
+
 if __name__ == '__main__':
     unittest.main()
+
+
+
+
+
+
+

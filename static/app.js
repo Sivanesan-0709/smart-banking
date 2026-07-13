@@ -299,6 +299,10 @@ function loadDashboardData() {
                 const txs = data.transactions;
                 badge.innerText = `${txs.length} Records`;
                 
+                // Load charts and metrics
+                renderClientSpendChart(txs);
+                loadDashboardMetrics();
+                
                 if (txs.length === 0) {
                     list.innerHTML = `<tr><td colspan="5" class="text-center text-muted">No transactions recorded yet.</td></tr>`;
                     document.getElementById('clientNormalCount').innerText = '0';
@@ -1078,6 +1082,7 @@ function loadAdminData() {
                 
                 // Load charts
                 renderVolumeChart(s.daily_trends);
+                loadEnterpriseAdminStats();
             }
         });
 
@@ -1564,6 +1569,21 @@ function openXaiTrace(txId) {
                 document.getElementById('xaiTxAmount').innerText = '₹' + tx.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 });
                 
                 document.getElementById('xaiRiskScore').innerText = trace.risk_score;
+                
+                // Render enriched XAI metrics
+                document.getElementById('xaiConfidence').innerText = (trace.confidence || 95) + '%';
+                document.getElementById('xaiRecommendation').innerText = trace.recommendation || 'Approved';
+                
+                const policiesList = document.getElementById('xaiPoliciesList');
+                if (policiesList) {
+                    policiesList.innerHTML = '';
+                    const policies = trace.triggered_policies || ["POL-000: Default Compliance Verification"];
+                    policies.forEach(p => {
+                        const li = document.createElement('li');
+                        li.innerText = p;
+                        policiesList.appendChild(li);
+                    });
+                }
                 
                 const levelEl = document.getElementById('xaiRiskLevel');
                 levelEl.innerText = trace.risk_level;
@@ -2090,4 +2110,768 @@ function exportLedger(format) {
     } else {
         window.print();
     }
+}
+
+
+// ==========================================
+// PHASE 1 – QR PAYMENT SYSTEM CLIENT WORKFLOWS
+// ==========================================
+
+let currentScannedToken = null;
+
+function openQrShowModal() {
+    fetch('/api/qr/token')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const container = document.getElementById("qrCanvasContainer");
+                container.innerHTML = ""; // Clear
+                
+                // Create qrcode using QRCode.js library
+                new QRCode(container, {
+                    text: data.qr_token,
+                    width: 180,
+                    height: 180,
+                    colorDark : "#0f172a",
+                    colorLight : "#ffffff",
+                    correctLevel : QRCode.CorrectLevel.H
+                });
+                
+                document.getElementById("qrShowModal").classList.remove("hidden");
+            } else {
+                showToast("QR Error", data.message || "Failed to generate QR code.", "error");
+            }
+        })
+        .catch(err => showToast("Network Error", "Could not fetch QR code token.", "error"));
+}
+
+function closeQrShowModal() {
+    document.getElementById("qrShowModal").classList.add("hidden");
+}
+
+function downloadMyQr() {
+    const img = document.getElementById("qrCanvasContainer").getElementsByTagName("img")[0];
+    const canvas = document.getElementById("qrCanvasContainer").getElementsByTagName("canvas")[0];
+    if (img) {
+        const a = document.createElement("a");
+        a.href = img.src;
+        a.download = "SmartBank_QR.png";
+        a.click();
+    } else if (canvas) {
+        const a = document.createElement("a");
+        a.href = canvas.toDataURL("image/png");
+        a.download = "SmartBank_QR.png";
+        a.click();
+    } else {
+        showToast("Download Error", "QR image not ready.", "error");
+    }
+}
+
+function openQrScanModal() {
+    document.getElementById("qrScanResult").classList.add("hidden");
+    document.getElementById("qrUploadContainer").style.display = "block";
+    document.getElementById("qrFileInput").value = "";
+    document.getElementById("qrScanModal").classList.remove("hidden");
+}
+
+function closeQrScanModal() {
+    document.getElementById("qrScanModal").classList.add("hidden");
+}
+
+function handleQrUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const img = new Image();
+        img.onload = function() {
+            const canvas = document.createElement("canvas");
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            const imgData = ctx.getImageData(0, 0, img.width, img.height);
+            
+            // Call jsQR decoder
+            const code = jsQR(imgData.data, imgData.width, imgData.height);
+            if (code) {
+                verifyScannedToken(code.data);
+            } else {
+                showToast("Decoding Failed", "No valid QR code found in this image.", "error");
+            }
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function verifyScannedToken(token) {
+    fetch('/api/qr/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qr_token: token })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            currentScannedToken = token;
+            document.getElementById("qrRecName").innerText = `${data.firstname} ${data.lastname}`;
+            document.getElementById("qrRecUsername").innerText = data.username;
+            
+            document.getElementById("qrUploadContainer").style.display = "none";
+            document.getElementById("qrScanResult").classList.remove("hidden");
+            showToast("Verified", "Recipient successfully verified.", "success");
+        } else {
+            showToast("Verification Failed", data.message || "Invalid or expired QR token.", "error");
+        }
+    })
+    .catch(err => showToast("Network Error", "Failed to verify scanned QR code.", "error"));
+}
+
+function executeQrPayment() {
+    const receiver = document.getElementById("qrRecUsername").innerText;
+    const amount = parseFloat(document.getElementById("qrAmount").value);
+    const remarks = document.getElementById("qrRemarks").value.trim();
+    const qr_token = currentScannedToken;
+    
+    if (isNaN(amount) || amount <= 0) {
+        showToast("Invalid Amount", "Please enter a valid transfer amount.", "error");
+        return;
+    }
+    
+    fetch('/api/transfer/initiate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            receiver: receiver,
+            amount: amount,
+            type: 'QR_PAYMENT',
+            qr_token: qr_token,
+            remarks: remarks
+        })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            showToast("Payment Successful", "Payment completed successfully!", "success");
+            closeQrScanModal();
+            loadDashboardData();
+        } else if (data.status === 'verification_required') {
+            closeQrScanModal();
+            if (data.face_required) {
+                openMfaModal(data.token, true);
+            } else {
+                openMfaModal(data.token, false);
+            }
+        } else if (data.status === 'pending_review') {
+            closeQrScanModal();
+            showToast("Held for Review", "Transaction flagged for administrative review.", "warning");
+            loadDashboardData();
+        } else {
+            showToast("Payment Error", data.message || "Failed to process QR payment.", "error");
+        }
+    })
+    .catch(err => {
+        showToast("Network Error", "Failed to initiate payment.", "error");
+    });
+}
+
+
+// ==========================================
+// PHASE 2 – BENEFICIARY CLIENT WORKFLOWS
+// ==========================================
+
+let beneficiaryCurrentPage = 1;
+let beneficiaryTotalRows = 0;
+
+function openBeneficiariesModal() {
+    beneficiaryCurrentPage = 1;
+    loadBeneficiaryList();
+    document.getElementById("beneficiariesModal").classList.remove("hidden");
+}
+
+function closeBeneficiariesModal() {
+    document.getElementById("beneficiariesModal").classList.add("hidden");
+}
+
+function openAddBeneficiaryModal() {
+    document.getElementById("addBUsername").value = "";
+    document.getElementById("addBNickname").value = "";
+    document.getElementById("addBeneficiaryModal").classList.remove("hidden");
+}
+
+function closeAddBeneficiaryModal() {
+    document.getElementById("addBeneficiaryModal").classList.add("hidden");
+}
+
+function loadBeneficiaryList() {
+    const search = document.getElementById("bSearchInput").value.trim();
+    const sort = document.getElementById("bSortSelect").value;
+    
+    fetch(`/api/beneficiaries?search=${encodeURIComponent(search)}&sort=${sort}&page=${beneficiaryCurrentPage}&per_page=5`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const tbody = document.getElementById("beneficiaryTableBody");
+                tbody.innerHTML = "";
+                
+                if (data.beneficiaries.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center;" class="text-muted">No beneficiaries found.</td></tr>`;
+                }
+                
+                data.beneficiaries.forEach(b => {
+                    const favIcon = b.is_favorite ? 'fa-star text-accent' : 'fa-star-o';
+                    const favClass = b.is_favorite ? 'fa-solid fa-star' : 'fa-regular fa-star';
+                    const favStyle = b.is_favorite ? 'color: #e9d502;' : 'color: rgba(255,255,255,0.4);';
+                    
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = `
+                        <td>
+                            <div><strong>${escapeHtml(b.nickname)}</strong></div>
+                            <div class="text-muted" style="font-size: 0.8rem;">@${escapeHtml(b.beneficiary_username)}</div>
+                        </td>
+                        <td>
+                            <div>${b.transfer_count} txs</div>
+                            <div class="text-muted" style="font-size: 0.8rem;">INR ${b.total_transferred.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
+                        </td>
+                        <td>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <button class="btn-clear" style="${favStyle} font-size:1.1rem; cursor:pointer;" onclick="toggleFavoriteBeneficiary(${b.id})" title="Favorite"><i class="${favClass}"></i></button>
+                                <button class="btn btn-accent btn-sm" onclick="quickTransferToBeneficiary('${escapeHtml(b.beneficiary_username)}')" style="padding: 2px 10px; font-size: 0.8rem;"><i class="fa-solid fa-paper-plane"></i> Send</button>
+                                <button class="btn btn-outline btn-sm" onclick="deleteBeneficiary(${b.id})" style="padding: 2px 10px; font-size: 0.8rem; border-color: rgba(239, 68, 68, 0.4); color: #ef4444;"><i class="fa-solid fa-trash-can"></i></button>
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                
+                beneficiaryTotalRows = data.total;
+                const totalPages = Math.ceil(beneficiaryTotalRows / 5) || 1;
+                document.getElementById("beneficiaryPageIndicator").innerText = `Page ${beneficiaryCurrentPage} of ${totalPages}`;
+            } else {
+                showToast("Beneficiary Error", data.message || "Failed to load beneficiaries.", "error");
+            }
+        })
+        .catch(err => showToast("Network Error", "Could not retrieve beneficiary list.", "error"));
+}
+
+function changeBeneficiaryPage(dir) {
+    const totalPages = Math.ceil(beneficiaryTotalRows / 5) || 1;
+    const newPage = beneficiaryCurrentPage + dir;
+    if (newPage >= 1 && newPage <= totalPages) {
+        beneficiaryCurrentPage = newPage;
+        loadBeneficiaryList();
+    }
+}
+
+function submitAddBeneficiary() {
+    const username = document.getElementById("addBUsername").value.trim();
+    const nickname = document.getElementById("addBNickname").value.trim();
+    
+    if (!username) {
+        showToast("Validation Error", "Username is required.", "error");
+        return;
+    }
+    
+    fetch('/api/beneficiaries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, nickname: nickname || username })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            showToast("Added", "Beneficiary successfully saved.", "success");
+            closeAddBeneficiaryModal();
+            // Refresh list if open
+            if (!document.getElementById("beneficiariesModal").classList.contains("hidden")) {
+                loadBeneficiaryList();
+            }
+        } else {
+            showToast("Error", data.message || "Failed to add beneficiary.", "error");
+        }
+    })
+    .catch(err => showToast("Network Error", "Failed to add beneficiary.", "error"));
+}
+
+function toggleFavoriteBeneficiary(id) {
+    fetch(`/api/beneficiaries/${id}/favorite`, { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                loadBeneficiaryList();
+            } else {
+                showToast("Error", data.message || "Failed to update favorite.", "error");
+            }
+        })
+        .catch(err => showToast("Network Error", "Failed to favorite beneficiary.", "error"));
+}
+
+function deleteBeneficiary(id) {
+    if (!confirm("Are you sure you want to remove this beneficiary?")) return;
+    
+    fetch(`/api/beneficiaries/${id}`, { method: 'DELETE' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showToast("Removed", "Beneficiary removed from list.", "success");
+                loadBeneficiaryList();
+            } else {
+                showToast("Error", data.message || "Failed to remove beneficiary.", "error");
+            }
+        })
+        .catch(err => showToast("Network Error", "Failed to remove beneficiary.", "error"));
+}
+
+function quickTransferToBeneficiary(username) {
+    closeBeneficiariesModal();
+    // Fill the normal transfer form and focus
+    const dest = document.getElementById("transferDestAccount") || document.getElementById("receiver");
+    if (dest) {
+        dest.value = username;
+        dest.focus();
+        showToast("Quick Transfer", `Pre-filled recipient @${username}`, "info");
+    } else {
+        showToast("Error", "Transfer form not found.", "error");
+    }
+}
+
+// Simple escape function to prevent XSS
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+
+// ==========================================
+// PHASE 3 – LOGIN SECURITY CENTER CLIENT WORKFLOWS
+// ==========================================
+
+let sessionCurrentPage = 1;
+let sessionTotalRows = 0;
+
+function openSecurityCenterModal() {
+    sessionCurrentPage = 1;
+    loadSessionList();
+    document.getElementById("securityCenterModal").classList.remove("hidden");
+}
+
+function closeSecurityCenterModal() {
+    document.getElementById("securityCenterModal").classList.add("hidden");
+}
+
+function loadSessionList() {
+    fetch(`/api/security/sessions?page=${sessionCurrentPage}&per_page=5`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const tbody = document.getElementById("sessionTableBody");
+                tbody.innerHTML = "";
+                
+                data.sessions.forEach(s => {
+                    const trustIcon = s.is_trusted ? 'fa-shield-heart' : 'fa-shield';
+                    const trustText = s.is_trusted ? 'Trusted Device' : 'Untrusted Device';
+                    const trustBtnClass = s.is_trusted ? 'btn-accent' : 'btn-outline';
+                    
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = `
+                        <td>
+                            <div>
+                                <i class="fa-solid fa-desktop text-muted" style="margin-right: 8px;"></i>
+                                <strong>${escapeHtml(s.browser)} on ${escapeHtml(s.os)}</strong>
+                                ${s.is_current ? '<span class="badge badge-success" style="margin-left: 8px; background: #22c55e; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem;">Current</span>' : ''}
+                            </div>
+                            <div class="text-muted" style="font-size: 0.8rem; margin-top: 4px;">IP: ${escapeHtml(s.ip_address)} | Type: ${escapeHtml(s.device_type)}</div>
+                        </td>
+                        <td>
+                            <div style="font-size: 0.9rem;">
+                                Status: <strong style="color: ${s.status === 'ACTIVE' ? '#22c55e' : '#ef4444'};">${escapeHtml(s.status)}</strong>
+                            </div>
+                            <div class="text-muted" style="font-size: 0.8rem; margin-top: 4px;">Last active: ${escapeHtml(s.last_activity)}</div>
+                        </td>
+                        <td>
+                            <div style="display: flex; gap: 8px;">
+                                <button class="btn btn-sm ${trustBtnClass}" onclick="toggleDeviceTrust('${escapeHtml(s.device_id || 'default_fingerprint')}', ${s.is_trusted ? 0 : 1})" style="padding: 2px 8px; font-size: 0.8rem;" title="${trustText}">
+                                    <i class="fa-solid ${trustIcon}"></i>
+                                </button>
+                                ${s.status === 'ACTIVE' && !s.is_current ? `
+                                    <button class="btn btn-outline btn-sm" onclick="revokeSession('${escapeHtml(s.session_id)}')" style="padding: 2px 8px; font-size: 0.8rem; border-color: rgba(239, 68, 68, 0.4); color: #ef4444;">
+                                        <i class="fa-solid fa-power-off"></i>
+                                    </button>
+                                ` : ''}
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                
+                sessionTotalRows = data.total;
+                const totalPages = Math.ceil(sessionTotalRows / 5) || 1;
+                document.getElementById("sessionPageIndicator").innerText = `Page ${sessionCurrentPage} of ${totalPages}`;
+            } else {
+                showToast("Security Center Error", data.message || "Failed to load active sessions.", "error");
+            }
+        })
+        .catch(err => showToast("Network Error", "Could not load session list.", "error"));
+}
+
+function changeSessionPage(dir) {
+    const totalPages = Math.ceil(sessionTotalRows / 5) || 1;
+    const newPage = sessionCurrentPage + dir;
+    if (newPage >= 1 && newPage <= totalPages) {
+        sessionCurrentPage = newPage;
+        loadSessionList();
+    }
+}
+
+function revokeSession(sid) {
+    if (!confirm("Are you sure you want to terminate this session?")) return;
+    
+    fetch('/api/security/sessions/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'success') {
+            showToast("Session Revoked", "The selected session has been terminated.", "success");
+            loadSessionList();
+        } else {
+            showToast("Revocation Failed", data.message || "Failed to terminate session.", "error");
+        }
+    })
+    .catch(err => showToast("Network Error", "Failed to contact revocation service.", "error"));
+}
+
+function revokeOtherSessions() {
+    if (!confirm("This will terminate all of your active sessions on other browsers and devices. Proceed?")) return;
+    
+    fetch('/api/security/sessions/revoke-others', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showToast("Sessions Terminated", "All other active sessions have been signed out.", "success");
+                loadSessionList();
+            } else {
+                showToast("Action Failed", data.message || "Failed to terminate other sessions.", "error");
+            }
+        })
+        .catch(err => showToast("Network Error", "Could not complete session termination.", "error"));
+}
+
+function toggleDeviceTrust(fingerprint, shouldTrust) {
+    fetch('/api/security/devices/trust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_fingerprint: fingerprint, is_trusted: shouldTrust })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'success') {
+            showToast("Device Updated", "Device trust state successfully updated.", "success");
+            loadSessionList();
+        } else {
+            showToast("Update Failed", data.message || "Failed to change device trust level.", "error");
+        }
+    })
+    .catch(err => showToast("Network Error", "Failed to update device trust status.", "error"));
+}
+
+
+// ==========================================
+// PHASE 5 – ENTERPRISE ADMIN EXPORTS & PIE CHART
+// ==========================================
+
+function downloadAdminReport(format) {
+    window.location.href = `/api/admin/reports/${format}`;
+}
+
+let fraudChartInstance = null;
+function renderFraudPieChart(totalTxs, totalFrauds) {
+    const ctx = document.getElementById('fraudDistributionChart');
+    if (!ctx) return;
+    
+    if (fraudChartInstance) {
+        fraudChartInstance.destroy();
+    }
+    
+    const normalTxs = Math.max(0, totalTxs - totalFrauds);
+    
+    fraudChartInstance = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Legitimate', 'Flagged Fraud'],
+            datasets: [{
+                data: [normalTxs, totalFrauds],
+                backgroundColor: ['#00f5d4', '#ef4444'],
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.1)'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: { color: '#cbd5e1', font: { size: 10 } }
+                }
+            }
+        }
+    });
+}
+
+function loadEnterpriseAdminStats() {
+    fetch('/api/admin/analytics/stats')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const s = data.stats;
+                document.getElementById('adminStatUsers').innerText = s.total_users;
+                document.getElementById('adminStatTxs').innerText = s.total_transactions;
+                document.getElementById('adminStatFrauds').innerText = s.total_frauds;
+                document.getElementById('adminStatOtpFailures').innerText = s.otp_failures;
+                document.getElementById('adminStatLoginFailures').innerText = s.login_failures;
+                document.getElementById('adminStatQrCount').innerText = s.qr_count;
+                document.getElementById('adminStatSessions').innerText = s.active_sessions;
+                
+                // Draw fraud distribution chart
+                renderFraudPieChart(s.total_transactions, s.total_frauds);
+            }
+        })
+        .catch(err => console.error("Error loading enterprise admin stats:", err));
+}
+
+
+// ==========================================
+// PHASE 6 – NOTIFICATION CENTER CLIENT LOGIC
+// ==========================================
+
+let notificationsUnreadOnly = false;
+
+function toggleNotificationDropdown() {
+    const el = document.getElementById("notificationDropdown");
+    el.classList.toggle("hidden");
+    if (!el.classList.contains("hidden")) {
+        loadNotificationsList();
+    }
+}
+
+function toggleUnreadFilter() {
+    notificationsUnreadOnly = !notificationsUnreadOnly;
+    const btn = document.getElementById("unreadFilterBtn");
+    if (notificationsUnreadOnly) {
+        btn.innerText = "All Notifications";
+        btn.classList.add("btn-accent");
+    } else {
+        btn.innerText = "Unread Only";
+        btn.classList.remove("btn-accent");
+    }
+    loadNotificationsList();
+}
+
+function loadNotificationsList() {
+    fetch(`/api/notifications?unread_only=${notificationsUnreadOnly}`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const badge = document.getElementById("notificationBadge");
+                if (data.unread_count > 0) {
+                    badge.innerText = data.unread_count;
+                    badge.classList.remove("hidden");
+                } else {
+                    badge.classList.add("hidden");
+                }
+                
+                const container = document.getElementById("notificationsContainer");
+                container.innerHTML = "";
+                
+                if (data.notifications.length === 0) {
+                    container.innerHTML = `<div class="text-muted text-center" style="padding: 15px 0;">No notifications found.</div>`;
+                    return;
+                }
+                
+                data.notifications.forEach(n => {
+                    let icon = 'fa-info-circle';
+                    let color = '#cbd5e1';
+                    if (n.type === 'TRANSFER') { icon = 'fa-paper-plane'; color = '#00f5d4'; }
+                    else if (n.type === 'DEPOSIT') { icon = 'fa-circle-down'; color = '#10b981'; }
+                    else if (n.type === 'SECURITY') { icon = 'fa-shield-halved'; color = '#ef4444'; }
+                    
+                    const item = document.createElement("div");
+                    item.style.background = n.is_read ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.06)';
+                    item.style.border = '1px solid rgba(255,255,255,0.06)';
+                    item.style.borderRadius = '8px';
+                    item.style.padding = '8px 12px';
+                    item.style.display = 'flex';
+                    item.style.justify = 'space-between';
+                    item.style.alignItems = 'flex-start';
+                    item.style.gap = '8px';
+                    
+                    item.innerHTML = `
+                        <div style="display: flex; gap: 8px;">
+                            <i class="fa-solid ${icon}" style="color: ${color}; margin-top: 3px; font-size: 0.95rem;"></i>
+                            <div>
+                                <div style="font-weight: bold; color: ${n.is_read ? '#94a3b8' : '#fff'};">${escapeHtml(n.title)}</div>
+                                <div style="font-size: 0.72rem; color: #94a3b8; margin-top: 2px;">${escapeHtml(n.message)}</div>
+                                <div style="font-size: 0.65rem; color: #64748b; margin-top: 4px;">${escapeHtml(n.created_at)}</div>
+                            </div>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 6px; align-items: flex-end;">
+                            ${!n.is_read ? `
+                                <button class="btn btn-sm btn-outline" onclick="markSingleNotificationRead(${n.id})" style="padding: 1px 4px; font-size: 0.6rem; border-radius: 3px;" title="Mark Read">
+                                    <i class="fa-solid fa-check"></i>
+                                </button>
+                            ` : ''}
+                            <button class="btn btn-sm btn-outline" onclick="deleteNotification(${n.id})" style="padding: 1px 4px; font-size: 0.6rem; border-radius: 3px; color: #ef4444; border-color: rgba(239, 68, 68, 0.2);" title="Delete">
+                                <i class="fa-solid fa-trash-can"></i>
+                            </button>
+                        </div>
+                    `;
+                    container.appendChild(item);
+                });
+            }
+        })
+        .catch(err => console.error("Error loading notifications:", err));
+}
+
+function markAllNotificationsRead() {
+    fetch('/api/notifications/read', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                loadNotificationsList();
+            }
+        })
+        .catch(err => console.error("Error marking all read:", err));
+}
+
+function markSingleNotificationRead(nid) {
+    fetch(`/api/notifications/${nid}/read`, { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                loadNotificationsList();
+            }
+        })
+        .catch(err => console.error("Error marking read:", err));
+}
+
+function deleteNotification(nid) {
+    fetch(`/api/notifications/${nid}`, { method: 'DELETE' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                loadNotificationsList();
+            }
+        })
+        .catch(err => console.error("Error deleting notification:", err));
+}
+
+// Auto load notifications count every 30s
+setInterval(() => {
+    if (typeof currentUser !== 'undefined' && currentUser.username) {
+        fetch('/api/notifications?unread_only=true')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    const badge = document.getElementById("notificationBadge");
+                    if (data.unread_count > 0) {
+                        badge.innerText = data.unread_count;
+                        badge.classList.remove("hidden");
+                    } else {
+                        badge.classList.add("hidden");
+                    }
+                }
+            }).catch(e => {});
+    }
+}, 30000);
+
+
+// ==========================================
+// PHASE 7 – CLIENT DASHBOARD SPEND CHARTS & METRICS
+// ==========================================
+
+let clientSpendChartInstance = null;
+function renderClientSpendChart(txs) {
+    const ctx = document.getElementById('clientSpendChart');
+    if (!ctx) return;
+    
+    if (clientSpendChartInstance) {
+        clientSpendChartInstance.destroy();
+    }
+    
+    const days = [];
+    const spends = {};
+    for (let i = 6; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        days.push(dateStr);
+        spends[dateStr] = 0;
+    }
+    
+    txs.forEach(t => {
+        if (t.sender === currentUser.username && t.type !== 'ADD_MONEY' && t.status === 'APPROVED') {
+            const txDate = new Date(t.timestamp);
+            const dateStr = txDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            if (spends[dateStr] !== undefined) {
+                spends[dateStr] += t.amount;
+            }
+        }
+    });
+    
+    const dataValues = days.map(d => spends[d]);
+    
+    clientSpendChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: days,
+            datasets: [{
+                label: 'Daily Spends (Rs)',
+                data: dataValues,
+                backgroundColor: 'rgba(56, 189, 248, 0.4)',
+                borderColor: '#38bdf8',
+                borderWidth: 1.5,
+                borderRadius: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+                y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } }
+            }
+        }
+    });
+}
+
+function loadDashboardMetrics() {
+    fetch('/api/dashboard/metrics')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const m = data.metrics;
+                document.getElementById('clientBalance').innerText = m.bank_balance.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('walletBalance').innerText = m.wallet_balance.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('monthlySpendsValue').innerText = m.monthly_spends.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('dashboardSecurityScore').innerText = m.security_score;
+                
+                const scoreEl = document.getElementById('dashboardSecurityScore');
+                if (m.security_score >= 80) scoreEl.style.color = '#34d399';
+                else if (m.security_score >= 50) scoreEl.style.color = '#fbbf24';
+                else scoreEl.style.color = '#f87171';
+            }
+        })
+        .catch(err => console.error("Error loading dashboard metrics:", err));
 }

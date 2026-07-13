@@ -137,6 +137,28 @@
                     </button>
                 </div>
                 <div class="nav-user">
+                    <!-- Notification Bell & Badge -->
+                    <div style="position: relative; display: inline-block; margin-right: 15px; align-self: center;">
+                        <button class="logout-btn" onclick="toggleNotificationDropdown()" style="background: transparent; border: none; font-size: 1.1rem; position: relative; padding: 5px; cursor: pointer;">
+                            <i class="fa-solid fa-bell"></i>
+                            <span id="notificationBadge" class="hidden" style="position: absolute; top: -2px; right: -2px; background: #ef4444; color: #fff; font-size: 0.65rem; padding: 1px 4px; border-radius: 50%; font-weight: bold; line-height: 1;">0</span>
+                        </button>
+                        
+                        <!-- Dropdown Panel -->
+                        <div id="notificationDropdown" class="glass-card hidden" style="position: absolute; right: 0; top: 40px; width: 330px; z-index: 1000; padding: 15px; max-height: 420px; overflow-y: auto; text-align: left; background: rgba(17, 24, 39, 0.95); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 8px; margin-bottom: 10px;">
+                                <h4 style="margin: 0; font-size: 0.95rem;"><i class="fa-solid fa-bell"></i> Notifications</h4>
+                                <div style="display: flex; gap: 6px;">
+                                    <button class="btn btn-outline" onclick="markAllNotificationsRead()" style="padding: 2px 6px; font-size: 0.68rem; border-radius: 4px;">Mark Read</button>
+                                    <button class="btn btn-outline" onclick="toggleUnreadFilter()" id="unreadFilterBtn" style="padding: 2px 6px; font-size: 0.68rem; border-radius: 4px;">Unread Only</button>
+                                </div>
+                            </div>
+                            <div id="notificationsContainer" style="display: flex; flex-direction: column; gap: 8px; font-size: 0.8rem; max-height: 320px; overflow-y: auto;">
+                                <!-- Populated dynamically -->
+                            </div>
+                        </div>
+                    </div>
+
                     <span class="user-badge" onclick="openProfileModal()">
                         <i class="fa-solid fa-circle-user"></i> <span id="navUsername">User</span>
                     </span>
@@ -255,10 +277,46 @@
                                     </button>
                                 </form>
                             </div>
+                            
+                            <!-- QR Payment Card -->
+                            <div class="glass-card" style="margin-top: 20px;">
+                                <h2><i class="fa-solid fa-qrcode"></i> QR Payments</h2>
+                                <p class="section-desc">Scan or upload a recipient's signed QR code to pay instantly.</p>
+                                <div style="display: flex; gap: 10px; margin-top: 15px;">
+                                    <button class="btn btn-accent flex-grow" onclick="openQrShowModal()"><i class="fa-solid fa-qrcode"></i> My QR Code</button>
+                                    <button class="btn btn-outline flex-grow" onclick="openQrScanModal()"><i class="fa-solid fa-camera"></i> Scan & Pay</button>
+                                </div>
+                            </div>
+
+                            <!-- Beneficiary Card -->
+                            <div class="glass-card" style="margin-top: 20px;">
+                                <h2><i class="fa-solid fa-users"></i> Beneficiaries</h2>
+                                <p class="section-desc">Manage frequent recipients and send money with one click.</p>
+                                <div style="display: flex; gap: 10px; margin-top: 15px;">
+                                    <button class="btn btn-accent flex-grow" onclick="openBeneficiariesModal()"><i class="fa-solid fa-list-ul"></i> Manage List</button>
+                                    <button class="btn btn-outline flex-grow" onclick="openAddBeneficiaryModal()"><i class="fa-solid fa-user-plus"></i> Add New</button>
+                                </div>
+                            </div>
+
+                            <!-- Security Center Card -->
+                            <div class="glass-card" style="margin-top: 20px;">
+                                <h2><i class="fa-solid fa-shield-halved"></i> Security Center</h2>
+                                <p class="section-desc">Manage active sessions, trust devices, and revoke unauthorized logins.</p>
+                                <button class="btn btn-accent btn-block" style="margin-top: 15px;" onclick="openSecurityCenterModal()"><i class="fa-solid fa-laptop-code"></i> Device & Session Manager</button>
+                            </div>
                         </div>
 
                         <!-- Right: Recent Activity -->
                         <div class="dashboard-column-right">
+                            <!-- Client Spends Chart Card -->
+                            <div class="glass-card" style="margin-bottom: 20px;">
+                                <h2><i class="fa-solid fa-chart-line" style="color: #00f5d4;"></i> Monthly Spend Analysis</h2>
+                                <p class="section-desc">Total Spends in the last 30 days: Rs <span id="monthlySpendsValue">0.00</span></p>
+                                <div style="height: 180px; margin-top: 15px;">
+                                    <canvas id="clientSpendChart"></canvas>
+                                </div>
+                            </div>
+
                             <div class="glass-card flex-column">
                                 <div class="card-header-row">
                                     <h2><i class="fa-solid fa-list-check"></i> Transaction Ledger</h2>
@@ -564,10 +622,14 @@
                     </div>
 
                     <!-- Admin Interactive Charts Row -->
-                    <div class="admin-charts-grid">
+                    <div class="admin-charts-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                         <div class="glass-card chart-card">
                             <h3>Transaction Volume Trend</h3>
                             <canvas id="volumeTrendChart"></canvas>
+                        </div>
+                        <div class="glass-card chart-card">
+                            <h3>Security & Fraud Distribution</h3>
+                            <canvas id="fraudDistributionChart" style="max-height: 250px;"></canvas>
                         </div>
                         <div class="glass-card chart-card">
                             <h3>Auditor Dashboard Control Hub</h3>
@@ -581,6 +643,10 @@
                                         <i class="fa-solid fa-arrows-rotate"></i> Reload Ledger Logs
                                     </button>
                                 </div>
+                                <div style="margin-top: 10px; display: flex; gap: 8px;">
+                                    <button class="btn btn-outline btn-sm" onclick="downloadAdminReport('csv')" style="flex: 1;"><i class="fa-solid fa-file-csv"></i> Export CSV</button>
+                                    <button class="btn btn-outline btn-sm" onclick="downloadAdminReport('pdf')" style="flex: 1;"><i class="fa-solid fa-file-pdf"></i> Export PDF</button>
+                                </div>
                                 <div style="margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px;">
                                     <h4 style="font-size: 0.85rem; margin-bottom: 8px; color: var(--text-primary);">Biometric Systems Summary</h4>
                                     <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
@@ -590,6 +656,35 @@
                                     <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
                                         <span class="text-muted">Biometric / Liveness Mismatches:</span>
                                         <strong id="adminBioMismatchesCount" class="text-danger">0</strong>
+                                    </div>
+                                    <h4 style="font-size: 0.85rem; margin-top: 15px; margin-bottom: 8px; color: var(--text-primary);">Enterprise Fraud Analytics</h4>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                                        <span class="text-muted">Total Users:</span>
+                                        <strong id="adminStatUsers" style="color: #fff;">0</strong>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                                        <span class="text-muted">Total Transactions:</span>
+                                        <strong id="adminStatTxs" style="color: #fff;">0</strong>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                                        <span class="text-muted">Fraud Predictions:</span>
+                                        <strong id="adminStatFrauds" class="text-danger">0</strong>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                                        <span class="text-muted">OTP Failures:</span>
+                                        <strong id="adminStatOtpFailures" class="text-danger">0</strong>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                                        <span class="text-muted">Login Failures:</span>
+                                        <strong id="adminStatLoginFailures" class="text-danger">0</strong>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                                        <span class="text-muted">QR Payments:</span>
+                                        <strong id="adminStatQrCount" style="color: #00f5d4;">0</strong>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
+                                        <span class="text-muted">Active Sessions:</span>
+                                        <strong id="adminStatSessions" style="color: #00f5d4;">0</strong>
                                     </div>
                                 </div>
                             </div>
@@ -776,6 +871,210 @@
                     <button class="btn btn-accent flex-grow" onclick="downloadDepositReceipt()"><i class="fa-solid fa-file-pdf"></i> Download Receipt</button>
                     <button class="btn btn-outline" onclick="closeAddMoneyModal()">Close</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MY QR CODE DISPLAY MODAL -->
+    <div id="qrShowModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 400px; text-align: center;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-qrcode"></i> My QR Code</h2>
+                <button class="close-modal" onclick="closeQrShowModal()">&times;</button>
+            </div>
+            <p class="text-muted" style="margin-top: 10px; font-size: 0.9rem; margin-bottom: 20px;">Scan this signed token QR code to receive payments securely.</p>
+            <div id="qrCanvasContainer" style="margin: 20px auto; padding: 15px; background: white; border-radius: 8px; width: 210px; height: 210px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 15px rgba(0,0,0,0.5);">
+                <!-- QR Code gets generated here dynamically -->
+            </div>
+            <button class="btn btn-accent btn-block" onclick="downloadMyQr()"><i class="fa-solid fa-download"></i> Download QR Code</button>
+        </div>
+    </div>
+
+    <!-- QR CODE SCANNER / UPLOADER MODAL -->
+    <div id="qrScanModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 450px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-camera"></i> Scan & Pay</h2>
+                <button class="close-modal" onclick="closeQrScanModal()">&times;</button>
+            </div>
+            <p class="text-muted" style="margin-top: 10px; font-size: 0.9rem; margin-bottom: 15px;">Upload a signed recipient QR code image to process payment.</p>
+            
+            <div id="qrUploadContainer" style="border: 2px dashed rgba(255,255,255,0.2); padding: 30px; border-radius: 8px; text-align: center; background: rgba(0,0,0,0.2); cursor: pointer;" onclick="document.getElementById('qrFileInput').click()">
+                <i class="fa-solid fa-cloud-arrow-up" style="font-size: 2.5rem; color: #9b5de5; margin-bottom: 10px;"></i>
+                <p>Click to browse or upload QR code image</p>
+                <input type="file" id="qrFileInput" style="display: none;" accept="image/*" onchange="handleQrUpload(event)">
+            </div>
+            
+            <div id="qrScanResult" class="hidden" style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 8px;">
+                <h3 style="color: #9b5de5; margin-bottom: 10px;"><i class="fa-solid fa-circle-user"></i> Recipient Verified</h3>
+                <div style="font-size: 0.9rem; line-height: 1.6; margin-bottom: 15px;">
+                    <div>Name: <strong id="qrRecName">John Doe</strong></div>
+                    <div>Username: <strong id="qrRecUsername">john_doe</strong></div>
+                </div>
+                
+                <div class="input-group">
+                    <label for="qrAmount">Amount (INR)</label>
+                    <input type="number" id="qrAmount" placeholder="Enter amount to transfer" required style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                </div>
+                
+                <div class="input-group" style="margin-top: 10px; margin-bottom: 20px;">
+                    <label for="qrRemarks">Remarks (Optional)</label>
+                    <input type="text" id="qrRemarks" placeholder="Enter transaction remarks" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                </div>
+                
+                <button class="btn btn-accent btn-block" onclick="executeQrPayment()"><i class="fa-solid fa-bolt"></i> Send Payment</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- BENEFICIARIES LIST MODAL -->
+    <div id="beneficiariesModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 650px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-users"></i> Beneficiary List</h2>
+                <button class="close-modal" onclick="closeBeneficiariesModal()">&times;</button>
+            </div>
+            
+            <!-- Filter & Search Controls -->
+            <div style="display: flex; gap: 10px; margin-top: 15px; margin-bottom: 15px;">
+                <input type="text" id="bSearchInput" placeholder="Search beneficiaries..." oninput="loadBeneficiaryList()" style="flex-grow: 2; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                <select id="bSortSelect" onchange="loadBeneficiaryList()" style="flex-grow: 1; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                    <option value="nickname">Sort by Name</option>
+                    <option value="favorite">Favorites First</option>
+                    <option value="stats">Transferred Stats</option>
+                </select>
+            </div>
+            
+            <div style="max-height: 350px; overflow-y: auto;">
+                <table class="table" style="width: 100%;">
+                    <thead>
+                        <tr>
+                            <th>Recipient</th>
+                            <th>Stats (Sent)</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="beneficiaryTableBody">
+                        <!-- Filled dynamically -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Pagination -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px; font-size: 0.9rem;">
+                <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeBeneficiaryPage(-1)">Prev</button>
+                <span id="beneficiaryPageIndicator">Page 1 of 1</span>
+                <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeBeneficiaryPage(1)">Next</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD BENEFICIARY MODAL -->
+    <div id="addBeneficiaryModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 400px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-user-plus"></i> Add Beneficiary</h2>
+                <button class="close-modal" onclick="closeAddBeneficiaryModal()">&times;</button>
+            </div>
+            
+            <div class="input-group" style="margin-top: 15px;">
+                <label for="addBUsername">Username</label>
+                <input type="text" id="addBUsername" placeholder="Recipient's username" required style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+            </div>
+            
+            <div class="input-group" style="margin-top: 15px; margin-bottom: 25px;">
+                <label for="addBNickname">Nickname / Alias</label>
+                <input type="text" id="addBNickname" placeholder="E.g., Mom, Friend, Bob" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+            </div>
+            
+            <button class="btn btn-accent btn-block" onclick="submitAddBeneficiary()"><i class="fa-solid fa-save"></i> Save Beneficiary</button>
+        </div>
+    </div>
+
+    <!-- SECURITY CENTER MODAL -->
+    <div id="securityCenterModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 750px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-shield-halved"></i> Security Center</h2>
+                <button class="close-modal" onclick="closeSecurityCenterModal()">&times;</button>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px; margin-bottom: 15px;">
+                <p class="text-muted" style="font-size: 0.9rem;">Review and manage active sessions for your account.</p>
+                <button class="btn btn-outline btn-sm" onclick="revokeOtherSessions()" style="border-color: rgba(239, 68, 68, 0.4); color: #ef4444;"><i class="fa-solid fa-power-off"></i> Terminate Other Sessions</button>
+            </div>
+            
+            <div style="max-height: 380px; overflow-y: auto;">
+                <table class="table" style="width: 100%;">
+                    <thead>
+                        <tr>
+                            <th>Device / Location</th>
+                            <th>Status / Last Active</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessionTableBody">
+                        <!-- Filled dynamically -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Pagination -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px; font-size: 0.9rem;">
+                <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeSessionPage(-1)">Prev</button>
+                <span id="sessionPageIndicator">Page 1 of 1</span>
+                <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeSessionPage(1)">Next</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EXPLAINABLE AI (XAI) DIALOG MODAL -->
+    <div id="xaiModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 550px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-brain" style="color: #9b5de5;"></i> AI Risk Explanation</h2>
+                <button class="close-modal" onclick="closeXaiModal()">&times;</button>
+            </div>
+            
+            <div style="text-align: center; margin-top: 15px; margin-bottom: 20px;">
+                <div style="font-size: 0.9rem; color: rgba(255,255,255,0.6);">Decision Confidence</div>
+                <div id="xaiConfidence" style="font-size: 3rem; font-weight: 700; color: #9b5de5; margin: 5px 0;">95%</div>
+                <div id="xaiRecommendation" style="font-size: 0.9rem; font-weight: 500; color: #fff; background: rgba(155, 93, 229, 0.15); padding: 8px 15px; border-radius: 20px; display: inline-block;">Approved: Standard transaction.</div>
+            </div>
+
+            <!-- Risk Score Metric -->
+            <div class="input-group" style="margin-bottom: 20px;">
+                <div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 8px;">
+                    <span>Calculated Risk Score:</span>
+                    <strong id="xaiRiskScore">10 / 100</strong>
+                </div>
+                <div style="width: 100%; height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;">
+                    <div id="xaiRiskBar" style="width: 10%; height: 100%; background: #9b5de5; transition: width 0.8s ease-in-out;"></div>
+                </div>
+            </div>
+
+            <!-- Feature Contributions -->
+            <div style="margin-bottom: 20px;">
+                <h3 style="font-size: 1rem; color: #9b5de5; margin-bottom: 10px;"><i class="fa-solid fa-chart-bar"></i> Feature Contributions</h3>
+                <div id="xaiFeaturesContainer" style="display: flex; flex-direction: column; gap: 10px;">
+                    <!-- Filled dynamically -->
+                </div>
+            </div>
+
+            <!-- Triggered Policies -->
+            <div style="margin-bottom: 20px;">
+                <h3 style="font-size: 1rem; color: #9b5de5; margin-bottom: 10px;"><i class="fa-solid fa-gavel"></i> Triggered Compliance Policies</h3>
+                <ul id="xaiPoliciesList" style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px;">
+                    <!-- Filled dynamically -->
+                </ul>
+            </div>
+
+            <!-- Risk Reasons -->
+            <div>
+                <h3 style="font-size: 1rem; color: #9b5de5; margin-bottom: 10px;"><i class="fa-solid fa-triangle-exclamation"></i> Identified Risk Factors</h3>
+                <ul id="xaiReasonsList" style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px;">
+                    <!-- Filled dynamically -->
+                </ul>
             </div>
         </div>
     </div>
@@ -1001,6 +1300,11 @@
                         <ul class="xai-reasons-list" id="xaiReasonsList" style="padding-left: 18px; font-size: 0.8rem; line-height: 1.4; color: var(--text-secondary);">
                             <!-- Populated dynamically -->
                         </ul>
+
+                        <h4 style="font-size: 0.85rem; color: var(--text-primary); margin-top: 15px; margin-bottom: 8px;">Triggered Compliance Policies:</h4>
+                        <ul class="xai-policies-list" id="xaiPoliciesList" style="padding-left: 18px; font-size: 0.8rem; line-height: 1.4; color: var(--text-secondary);">
+                            <!-- Populated dynamically -->
+                        </ul>
                     </div>
 
                     <!-- Right: ML Features & Authentication Steps -->
@@ -1042,6 +1346,8 @@
         </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script src="app.js?v=3.1"></script>
 </body>
