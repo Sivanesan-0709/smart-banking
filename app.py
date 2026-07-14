@@ -3126,6 +3126,9 @@ def add_money_initiate():
             VALUES (%s, 'WALLET_DEPOSIT_SUCCESS', 'LOW', %s)
             ''', (user_id, f"Added INR {amount} via {method}/{gateway}"))
             
+            # Create notification
+            create_notification(user_id, "Smart Wallet Credit", f"Successfully topped up wallet with Rs {amount:.2f}.", "DEPOSIT", cursor=cursor)
+            
             conn.commit()
             conn.close()
             
@@ -3489,11 +3492,7 @@ def add_money_analytics():
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-if __name__ == '__main__':
-    init_db()
-    port = int(os.environ.get('PORT', 5001))
-    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
-    socketio.run(app, host='0.0.0.0', port=port, debug=is_dev, use_reloader=False, allow_unsafe_werkzeug=is_dev)
+
 
 
 # ==========================================
@@ -4462,3 +4461,9 @@ def get_dashboard_metrics():
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    init_db()
+    port = int(os.environ.get('PORT', 5001))
+    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+    socketio.run(app, host='0.0.0.0', port=port, debug=is_dev, use_reloader=False, allow_unsafe_werkzeug=is_dev)

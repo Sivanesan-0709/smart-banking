@@ -1973,9 +1973,100 @@ class BankAppTestCase(unittest.TestCase):
         score = data['metrics']['security_score']
         self.assertTrue(0 <= score <= 100)
 
+    def test_notification_on_transfer(self):
+        # Register sender
+        self.client.post('/api/register', json={
+            "username": "s_user", "firstname": "S", "lastname": "User",
+            "email": "s@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        # Register receiver
+        self.client.post('/api/register', json={
+            "username": "r_user", "firstname": "R", "lastname": "User",
+            "email": "r@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        
+        # Login sender
+        self.client.post('/api/login', json={"username": "s_user", "password": "pwd"})
+        
+        # Transfer
+        self.client.post('/api/transfer/initiate', json={
+            "receiver": "r_user",
+            "amount": 500,
+            "remarks": "Test Transfer"
+        })
+        
+        # Check sender notifications
+        res_s = self.client.get('/api/notifications')
+        data_s = json.loads(res_s.data)
+        self.assertTrue(any("Transferred" in n['title'] for n in data_s['notifications']))
+        
+        # Login receiver
+        self.client.post('/api/login', json={"username": "r_user", "password": "pwd"})
+        
+        # Check receiver notifications
+        res_r = self.client.get('/api/notifications')
+        data_r = json.loads(res_r.data)
+        self.assertTrue(any("Credited" in n['title'] for n in data_r['notifications']))
+
+    def test_notification_on_deposit(self):
+        self.client.post('/api/register', json={
+            "username": "d_user", "firstname": "D", "lastname": "User",
+            "email": "d@test.com", "password": "pwd", "confirm": "pwd",
+            "phone": "123", "sex": "M", "address": "Addr"
+        })
+        self.client.post('/api/login', json={"username": "d_user", "password": "pwd"})
+        
+        # Initiate deposit
+        self.client.post('/api/add-money/initiate', json={
+            "amount": 1000,
+            "method": "UPI",
+            "gateway": "Google Pay",
+            "remarks": "Deposit"
+        })
+        
+        # Check notifications
+        res = self.client.get('/api/notifications')
+        data = json.loads(res.data)
+        self.assertTrue(any("Credit" in n['title'] for n in data['notifications']))
+
+    def test_unauthorized_profile(self):
+        res = self.client.get('/api/profile')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_transactions(self):
+        res = self.client.get('/api/transactions')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_beneficiaries(self):
+        res = self.client.get('/api/beneficiaries')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_sessions(self):
+        res = self.client.get('/api/security/sessions')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_notifications(self):
+        res = self.client.get('/api/notifications')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_dashboard_metrics(self):
+        res = self.client.get('/api/dashboard/metrics')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_qr_token(self):
+        res = self.client.get('/api/qr/token')
+        self.assertEqual(res.status_code, 401)
+
+    def test_unauthorized_admin_stats(self):
+        res = self.client.get('/api/admin/analytics/stats')
+        self.assertEqual(res.status_code, 401)
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
 
 
