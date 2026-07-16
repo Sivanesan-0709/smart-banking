@@ -304,15 +304,51 @@
                                 <p class="section-desc">Manage active sessions, trust devices, and revoke unauthorized logins.</p>
                                 <button class="btn btn-accent btn-block" style="margin-top: 15px;" onclick="openSecurityCenterModal()"><i class="fa-solid fa-laptop-code"></i> Device & Session Manager</button>
                             </div>
+                            <!-- Financial Insights Card (Feature 3) -->
+                            <div class="glass-card" style="margin-top: 20px;" id="insightsCard">
+                                <h2><i class="fa-solid fa-lightbulb" style="color: #f59e0b;"></i> Financial Insights Dashboard</h2>
+                                <p class="section-desc">AI-powered summary of your monthly spending habits.</p>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px;">
+                                    <div style="background: rgba(255,255,255,0.03); padding: 10px; border-radius: 8px;">
+                                        <div style="font-size: 0.75rem; color: var(--text-secondary);">Monthly Spending</div>
+                                        <div style="font-size: 1.1rem; font-weight: bold; color: #f43f5e;" id="insightSpending">Rs 0.00</div>
+                                    </div>
+                                    <div style="background: rgba(255,255,255,0.03); padding: 10px; border-radius: 8px;">
+                                        <div style="font-size: 0.75rem; color: var(--text-secondary);">Monthly Income</div>
+                                        <div style="font-size: 1.1rem; font-weight: bold; color: #10b981;" id="insightIncome">Rs 0.00</div>
+                                    </div>
+                                    <div style="background: rgba(255,255,255,0.03); padding: 10px; border-radius: 8px;">
+                                        <div style="font-size: 0.75rem; color: var(--text-secondary);">Monthly Savings</div>
+                                        <div style="font-size: 1.1rem; font-weight: bold; color: #06b6d4;" id="insightSavings">Rs 0.00</div>
+                                    </div>
+                                    <div style="background: rgba(255,255,255,0.03); padding: 10px; border-radius: 8px;">
+                                        <div style="font-size: 0.75rem; color: var(--text-secondary);">Largest Expense</div>
+                                        <div style="font-size: 1.1rem; font-weight: bold; color: #a855f7;" id="insightLargest">Rs 0.00</div>
+                                    </div>
+                                </div>
+                                <div style="background: rgba(245, 158, 11, 0.08); padding: 10px; border-radius: 8px; margin-top: 12px; font-size: 0.8rem; border-left: 3px solid #f59e0b; line-height: 1.4;" id="insightComparison">
+                                    Analyzing transaction patterns...
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Right: Recent Activity -->
                         <div class="dashboard-column-right">
-                            <!-- Client Spends Chart Card -->
+                            <!-- Dynamic Multi-chart Analytics Card (Feature 2) -->
                             <div class="glass-card" style="margin-bottom: 20px;">
-                                <h2><i class="fa-solid fa-chart-line" style="color: #00f5d4;"></i> Monthly Spend Analysis</h2>
-                                <p class="section-desc">Total Spends in the last 30 days: Rs <span id="monthlySpendsValue">0.00</span></p>
-                                <div style="height: 180px; margin-top: 15px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <h2><i class="fa-solid fa-chart-pie" style="color: #00f5d4;"></i> Financial Analytics</h2>
+                                    <select id="analyticsChartSelect" onchange="switchAnalyticsChart()" style="padding: 4px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.3); color: #fff;">
+                                        <option value="spend">Daily Spends (7d)</option>
+                                        <option value="deposits">Monthly Deposits</option>
+                                        <option value="withdrawals">Monthly Withdrawals</option>
+                                        <option value="transfers">Monthly Transfers</option>
+                                        <option value="fraud">Risk & Fraud Events</option>
+                                        <option value="trend">Balance Timeline</option>
+                                    </select>
+                                </div>
+                                <p class="section-desc" id="chartDesc">Total Spends in the last 30 days: Rs <span id="monthlySpendsValue">0.00</span></p>
+                                <div style="height: 180px; margin-top: 15px; position: relative;">
                                     <canvas id="clientSpendChart"></canvas>
                                 </div>
                             </div>
@@ -320,7 +356,10 @@
                             <div class="glass-card flex-column">
                                 <div class="card-header-row">
                                     <h2><i class="fa-solid fa-list-check"></i> Transaction Ledger</h2>
-                                    <span class="card-header-badge" id="txCountBadge">0 Records</span>
+                                    <div style="display: flex; gap: 8px; align-items: center;">
+                                        <span class="card-header-badge" id="txCountBadge">0 Records</span>
+                                        <button class="btn btn-outline btn-sm" onclick="openStatementModal()" style="padding: 2px 8px; font-size: 0.72rem; border-radius: 4px;"><i class="fa-solid fa-file-pdf"></i> Statement</button>
+                                    </div>
                                 </div>
                                 <div class="ledger-controls" style="margin-top: 10px; margin-bottom: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
                                     <input type="text" id="txSearchInput" placeholder="Search transactions..." oninput="filterTransactions()" style="flex: 1; min-width: 150px; padding: 6px 10px; font-size: 0.8rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;">
@@ -999,31 +1038,80 @@
                 <button class="close-modal" onclick="closeSecurityCenterModal()">&times;</button>
             </div>
             
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px; margin-bottom: 15px;">
-                <p class="text-muted" style="font-size: 0.9rem;">Review and manage active sessions for your account.</p>
-                <button class="btn btn-outline btn-sm" onclick="revokeOtherSessions()" style="border-color: rgba(239, 68, 68, 0.4); color: #ef4444;"><i class="fa-solid fa-power-off"></i> Terminate Other Sessions</button>
+            <!-- Tabs links -->
+            <div style="display: flex; gap: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); margin-top: 15px; margin-bottom: 15px;">
+                <button class="btn btn-outline btn-sm active" id="secTabSessionsBtn" onclick="switchSecurityTab('sessions')" style="border-bottom: none; border-radius: 4px 4px 0 0; padding: 6px 12px; font-size: 0.8rem;">Active Sessions</button>
+                <button class="btn btn-outline btn-sm" id="secTabDevicesBtn" onclick="switchSecurityTab('devices')" style="border-bottom: none; border-radius: 4px 4px 0 0; padding: 6px 12px; font-size: 0.8rem;">Trusted Devices</button>
+                <button class="btn btn-outline btn-sm" id="secTabHistoryBtn" onclick="switchSecurityTab('history')" style="border-bottom: none; border-radius: 4px 4px 0 0; padding: 6px 12px; font-size: 0.8rem;">Login History</button>
             </div>
             
-            <div style="max-height: 380px; overflow-y: auto;">
-                <table class="table" style="width: 100%;">
-                    <thead>
-                        <tr>
-                            <th>Device / Location</th>
-                            <th>Status / Last Active</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="sessionTableBody">
-                        <!-- Filled dynamically -->
-                    </tbody>
-                </table>
+            <!-- Pane 1: Sessions -->
+            <div id="secPaneSessions">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <p class="text-muted" style="font-size: 0.85rem; margin: 0;">Review and manage active sessions for your account.</p>
+                    <button class="btn btn-outline btn-sm" onclick="revokeOtherSessions()" style="border-color: rgba(239, 68, 68, 0.4); color: #ef4444;"><i class="fa-solid fa-power-off"></i> Terminate Other Sessions</button>
+                </div>
+                <div style="max-height: 280px; overflow-y: auto;">
+                    <table class="table" style="width: 100%;">
+                        <thead>
+                            <tr>
+                                <th>Device / Location</th>
+                                <th>Status / Last Active</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sessionTableBody">
+                            <!-- Filled dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+                <!-- Pagination -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px; font-size: 0.9rem;">
+                    <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeSessionPage(-1)">Prev</button>
+                    <span id="sessionPageIndicator">Page 1 of 1</span>
+                    <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeSessionPage(1)">Next</button>
+                </div>
             </div>
             
-            <!-- Pagination -->
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px; font-size: 0.9rem;">
-                <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeSessionPage(-1)">Prev</button>
-                <span id="sessionPageIndicator">Page 1 of 1</span>
-                <button class="btn btn-outline" style="padding: 5px 15px;" onclick="changeSessionPage(1)">Next</button>
+            <!-- Pane 2: Trusted Devices -->
+            <div id="secPaneDevices" class="hidden">
+                <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 15px;">These browsers/devices bypass verification codes during login.</p>
+                <div style="max-height: 280px; overflow-y: auto;">
+                    <table class="table" style="width: 100%;">
+                        <thead>
+                            <tr>
+                                <th>Browser</th>
+                                <th>OS / Device</th>
+                                <th>Last Used</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trustedDevicesTableBody">
+                            <tr><td colspan="4" class="text-center text-muted">No trusted devices found.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Pane 3: Login History -->
+            <div id="secPaneHistory" class="hidden">
+                <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 15px;">Historical audit of authentication events for your username.</p>
+                <div style="max-height: 280px; overflow-y: auto;">
+                    <table class="table" style="width: 100%;">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>IP Address</th>
+                                <th>Device / Browser</th>
+                                <th>Status</th>
+                                <th>Location</th>
+                            </tr>
+                        </thead>
+                        <tbody id="loginHistoryTableBody">
+                            <tr><td colspan="5" class="text-center text-muted">No login logs recorded.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -1126,6 +1214,28 @@
 
             <hr class="modal-divider">
 
+            <hr class="modal-divider">
+            
+            <form id="passwordUpdateForm" onsubmit="handlePasswordUpdate(event)" style="margin-top: 15px; margin-bottom: 20px;">
+                <h3>Change Account Password</h3>
+                <p class="text-muted" style="font-size: 0.8rem; margin-bottom: 12px;">Update your password regularly to prevent unauthorized access. All other active sessions will be terminated.</p>
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label for="pwdCurrent">Current Password</label>
+                        <input type="password" id="pwdCurrent" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="pwdNew">New Password</label>
+                        <input type="password" id="pwdNew" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="pwdConfirm">Confirm New Password</label>
+                        <input type="password" id="pwdConfirm" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-outline btn-block" style="margin-top: 12px; border-color: var(--accent-color); color: var(--accent-color);">Update Password</button>
+            </form>
+
             <div class="danger-zone">
                 <h3>Danger Zone</h3>
                 <p>Deleting your account will purge your database record. You must enter your current password to execute account purge.</p>
@@ -1148,7 +1258,7 @@
             </div>
             <div class="modal-body text-center">
                 <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 12px;">
-                    We will capture 3 quality samples of your face to establish a secure biometric identity lock.
+                    We will capture 5 quality samples of your face (Straight, Left, Right, Up, Down) to establish a secure biometric identity lock.
                 </p>
                 
                 <div class="camera-container" style="position: relative; border-radius: 12px; overflow: hidden; background: #000; border: 2px solid rgba(155, 93, 229, 0.3); height: 280px; display: flex; align-items: center; justify-content: center; margin: 0 auto; max-width: 380px;">
@@ -1164,10 +1274,12 @@
                 <div id="enrollFeedback" class="text-warning text-center" style="font-size: 0.85rem; margin-top: 10px; min-height: 20px; font-weight: 500;"></div>
                 
                 <!-- Sample Progress indicators -->
-                <div class="sample-indicators" style="display: flex; justify-content: center; gap: 20px; margin-top: 15px;">
-                    <div class="sample-dot" id="sampleDot1" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">1</div>
-                    <div class="sample-dot" id="sampleDot2" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">2</div>
-                    <div class="sample-dot" id="sampleDot3" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">3</div>
+                <div class="sample-indicators" style="display: flex; justify-content: center; gap: 15px; margin-top: 15px;">
+                    <div class="sample-dot" id="sampleDot1" title="Straight" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">1</div>
+                    <div class="sample-dot" id="sampleDot2" title="Slight Left" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">2</div>
+                    <div class="sample-dot" id="sampleDot3" title="Slight Right" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">3</div>
+                    <div class="sample-dot" id="sampleDot4" title="Slight Up" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">4</div>
+                    <div class="sample-dot" id="sampleDot5" title="Slight Down" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">5</div>
                 </div>
                 
                 <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center;">
@@ -1350,5 +1462,44 @@
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script src="app.js?v=3.1"></script>
+    <!-- STATEMENT GENERATOR MODAL (Feature 1) -->
+    <div id="statementModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 420px;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-file-invoice-dollar"></i> Bank Statement</h2>
+                <button class="close-modal" onclick="closeStatementModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding-top: 15px;">
+                <div class="input-group">
+                    <label for="statementStart">Start Date</label>
+                    <input type="date" id="statementStart" required style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color:#fff;">
+                </div>
+                <div class="input-group" style="margin-top: 10px;">
+                    <label for="statementEnd">End Date</label>
+                    <input type="date" id="statementEnd" required style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color:#fff;">
+                </div>
+                <button class="btn btn-accent btn-block" style="margin-top: 20px;" onclick="downloadStatementPDF()"><i class="fa-solid fa-download"></i> Download Statement PDF</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LOGIN MFA MODAL (Feature 5) -->
+    <div id="loginMfaModal" class="modal hidden">
+        <div class="modal-content glass-card" style="max-width: 400px; text-align: center;">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-shield-halved" style="color: #9b5de5;"></i> Security Verification</h2>
+                <button class="close-modal" onclick="closeLoginMfaModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding-top: 15px;">
+                <p style="font-size: 0.9rem; color: var(--text-secondary); line-height: 1.5; margin-bottom: 20px;">
+                    We detected a login attempt from an unrecognized browser/device. Please enter the verification code sent to <span id="loginMfaMaskedEmail" style="color: #fff; font-weight: 600;"></span>.
+                </p>
+                <div class="input-group">
+                    <input type="text" id="loginMfaCode" placeholder="Enter 6-digit code" maxlength="6" style="text-align: center; font-size: 1.4rem; letter-spacing: 4px; font-weight: bold; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px; color:#fff;" required>
+                </div>
+                <button class="btn btn-accent btn-block" style="margin-top: 20px;" onclick="submitLoginMfa()"><i class="fa-solid fa-circle-check"></i> Verify & Log In</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

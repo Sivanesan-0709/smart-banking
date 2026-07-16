@@ -205,6 +205,10 @@ function handleLogin(e) {
             currentUser = data.user;
             showToast('Login Success', data.message, 'success');
             showMainLayout();
+        } else if (data.status === 'verification_required') {
+            document.getElementById('loginMfaMaskedEmail').innerText = data.email_masked;
+            document.getElementById('loginMfaModal').classList.remove('hidden');
+            document.getElementById('loginMfaCode').focus();
         } else {
             showToast('Login Error', data.message || 'Invalid credentials.', 'error');
         }
@@ -300,8 +304,22 @@ function loadDashboardData() {
                 badge.innerText = `${txs.length} Records`;
                 
                 // Load charts and metrics
+                currentTxs = txs;
                 renderClientSpendChart(txs);
                 loadDashboardMetrics();
+                
+                // Fetch dynamic analytics dashboard data (Feature 2)
+                fetch('/api/analytics/dashboard')
+                    .then(res => res.json())
+                    .then(resData => {
+                        if (resData.status === 'success') {
+                            cachedAnalytics = resData.analytics;
+                            switchAnalyticsChart(); // Update dynamic chart view
+                        }
+                    });
+                
+                // Fetch financial insights widget data (Feature 3)
+                loadFinancialInsights();
                 
                 if (txs.length === 0) {
                     list.innerHTML = `<tr><td colspan="5" class="text-center text-muted">No transactions recorded yet.</td></tr>`;
@@ -335,9 +353,14 @@ function loadDashboardData() {
                         <td class="font-heading font-bold">${isSender ? '-' : '+'}₹${tx.amount.toLocaleString()}</td>
                         <td>${statusBadge}</td>
                         <td>
-                            <button class="btn btn-outline btn-sm" onclick="openXaiTrace(${tx.id})" style="padding: 2px 6px; font-size: 0.72rem; border-radius: 4px;">
-                                <i class="fa-solid fa-brain"></i> Explain
-                            </button>
+                            <div style="display: flex; gap: 4px;">
+                                <button class="btn btn-outline btn-sm" onclick="openXaiTrace(${tx.id})" style="padding: 2px 6px; font-size: 0.72rem; border-radius: 4px;">
+                                    <i class="fa-solid fa-brain"></i> Explain
+                                </button>
+                                <button class="btn btn-accent btn-sm" onclick="downloadReceiptPDF(${tx.id})" style="padding: 2px 6px; font-size: 0.72rem; border-radius: 4px; background: #06b6d4; border-color: #06b6d4;">
+                                    <i class="fa-solid fa-receipt"></i> Receipt
+                                </button>
+                            </div>
                         </td>
                     `;
                     list.appendChild(row);
@@ -404,7 +427,9 @@ function handleAccountDelete(e) {
 // --- 1. Face Biometrics Enrollment Wizard ---
 let enrollStream = null;
 let enrollSamples = [];
-const maxEnrollSamples = 3;
+const maxEnrollSamples = 5;
+const enrollPoses = ['Straight', 'Slight Left', 'Slight Right', 'Slight Up', 'Slight Down'];
+const enrollPoseInstructions = ['Look straight at the camera.', 'Turn your head slightly to the left.', 'Turn your head slightly to the right.', 'Tilt your head slightly up.', 'Tilt your head slightly down.'];
 
 function loadBiometricStatus() {
     fetch('/api/biometric/status')
@@ -442,7 +467,7 @@ function loadBiometricStatus() {
 function openEnrollmentModal() {
     document.getElementById('enrollmentModal').classList.remove('hidden');
     enrollSamples = [];
-    document.getElementById('enrollFeedback').innerText = '';
+    document.getElementById('enrollFeedback').innerText = 'Please click Start Camera to begin.';
     updateEnrollProgress();
     document.getElementById('captureFrameBtn').classList.add('hidden');
     document.getElementById('startCameraBtn').classList.remove('hidden');
@@ -465,7 +490,7 @@ function stopEnrollWebcam() {
 
 function initEnrollWebcam() {
     document.getElementById('enrollFeedback').innerText = 'Accessing camera device...';
-    navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
+    navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 } } })
         .then(stream => {
             enrollStream = stream;
             const video = document.getElementById('enrollVideo');
@@ -473,7 +498,9 @@ function initEnrollWebcam() {
             document.getElementById('cameraPlaceholder').classList.add('hidden');
             document.getElementById('startCameraBtn').classList.add('hidden');
             document.getElementById('captureFrameBtn').classList.remove('hidden');
-            document.getElementById('enrollFeedback').innerText = 'Camera active. Frame your face inside the dashed oval.';
+            
+            console.log("Camera initialized successfully. Video stream active.");
+            updatePoseInstructions();
         })
         .catch(err => {
             document.getElementById('enrollFeedback').innerText = 'Camera Access Error: ' + err.message;
@@ -495,29 +522,95 @@ function updateEnrollProgress() {
     }
 }
 
+function updatePoseInstructions() {
+    const idx = enrollSamples.length;
+    if (idx < maxEnrollSamples) {
+        document.getElementById('enrollFeedback').innerText = `Pose ${idx+1}/5 [${enrollPoses[idx]}]: ${enrollPoseInstructions[idx]}`;
+    }
+}
+
 function captureEnrollSample() {
     if (!enrollStream) return;
     const video = document.getElementById('enrollVideo');
     const canvas = document.getElementById('enrollCanvas');
     const ctx = canvas.getContext('2d');
     
-    canvas.width = video.videoWidth || 320;
-    canvas.height = video.videoHeight || 240;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
     
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/jpeg');
     
-    enrollSamples.push(dataUrl);
-    updateEnrollProgress();
+    console.log("Frame captured:", canvas.width, "x", canvas.height, "Base64 length:", dataUrl.length);
     
-    document.getElementById('enrollFeedback').innerText = `Captured sample ${enrollSamples.length}/3`;
-    
-    if (enrollSamples.length >= maxEnrollSamples) {
-        document.getElementById('captureFrameBtn').classList.add('hidden');
-        document.getElementById('enrollFeedback').innerText = 'Analyzing face templates...';
-        stopEnrollWebcam();
-        submitEnrollTemplates();
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let isBlank = true;
+    for (let i = 4; i < imgData.length; i += 4) {
+        if (imgData[i] !== imgData[0] || imgData[i+1] !== imgData[1] || imgData[i+2] !== imgData[2]) {
+            isBlank = false;
+            break;
+        }
     }
+    
+    if (isBlank) {
+        console.warn("Capture Error: Canvas frame is blank.");
+        showToast('Capture Error', 'Webcam frame is blank/empty. Please retry.', 'error');
+        return;
+    }
+    
+    let sum = 0;
+    for (let i = 0; i < imgData.length; i += 4) {
+        sum += imgData[i];
+    }
+    const mean = sum / (imgData.length / 4);
+    let variance = 0;
+    for (let i = 0; i < imgData.length; i += 4) {
+        variance += Math.pow(imgData[i] - mean, 2);
+    }
+    variance = variance / (imgData.length / 4);
+    
+    if (variance < 10) {
+        console.warn("Capture Error: Canvas pixel variance too low (" + variance + ").");
+        showToast('Capture Error', 'Image contrast is too low. Please improve lighting.', 'error');
+        return;
+    }
+    
+    const idx = enrollSamples.length;
+    const pose = enrollPoses[idx];
+    
+    document.getElementById('enrollFeedback').innerText = `Validating quality for sample ${idx+1}/5...`;
+    
+    fetch('/api/biometric/enroll/sample', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: dataUrl, index: idx, pose: pose })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            enrollSamples.push(dataUrl);
+            updateEnrollProgress();
+            
+            showToast('Sample Accepted', data.message, 'success');
+            
+            if (enrollSamples.length >= maxEnrollSamples) {
+                document.getElementById('captureFrameBtn').classList.add('hidden');
+                document.getElementById('enrollFeedback').innerText = 'Analyzing face templates...';
+                stopEnrollWebcam();
+                submitEnrollTemplates();
+            } else {
+                updatePoseInstructions();
+            }
+        } else {
+            console.warn("Backend rejected sample quality:", data.message);
+            document.getElementById('enrollFeedback').innerText = `Quality Error: ${data.message} Please retry.`;
+            showToast('Quality Error', data.message || 'Validation failed.', 'error');
+        }
+    })
+    .catch(() => {
+        showToast('Network Error', 'Connection to validation server failed.', 'error');
+        updatePoseInstructions();
+    });
 }
 
 function submitEnrollTemplates() {
@@ -2874,4 +2967,297 @@ function loadDashboardMetrics() {
             }
         })
         .catch(err => console.error("Error loading dashboard metrics:", err));
+}
+
+// --- Enterprise Features Logic (Features 1, 2, 3, 5, 6, 9) ---
+
+let currentTxs = [];
+let cachedAnalytics = null;
+
+function closeLoginMfaModal() {
+    document.getElementById('loginMfaModal').classList.add('hidden');
+    document.getElementById('loginMfaCode').value = '';
+}
+
+function submitLoginMfa() {
+    const otp = document.getElementById('loginMfaCode').value.trim();
+    if (!otp) {
+        showToast('Verification Error', 'Please enter the verification code.', 'error');
+        return;
+    }
+    
+    const btn = document.querySelector('#loginMfaModal .btn-accent');
+    const originalHTML = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
+    
+    fetch('/api/login/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ otp })
+    })
+    .then(async res => {
+        const data = await res.json();
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+        
+        if (res.status === 200 && data.status === 'success') {
+            currentUser = data.user;
+            closeLoginMfaModal();
+            showToast('Login Success', 'Successfully logged in!', 'success');
+            showMainLayout();
+        } else {
+            showToast('Verification Error', data.message || 'Invalid code.', 'error');
+        }
+    })
+    .catch(() => {
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+        showToast('Network Error', 'Could not establish connection.', 'error');
+    });
+}
+
+function openStatementModal() {
+    document.getElementById('statementModal').classList.remove('hidden');
+    // Set default dates
+    const end = new Date().toISOString().split('T')[0];
+    const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    document.getElementById('statementStart').value = start;
+    document.getElementById('statementEnd').value = end;
+}
+
+function closeStatementModal() {
+    document.getElementById('statementModal').classList.add('hidden');
+}
+
+function downloadStatementPDF() {
+    const start = document.getElementById('statementStart').value;
+    const end = document.getElementById('statementEnd').value;
+    if (!start || !end) {
+        showToast('Filter Error', 'Please select both start and end dates.', 'error');
+        return;
+    }
+    window.open(`/api/statement/download?start_date=${start}&end_date=${end}`, '_blank');
+    closeStatementModal();
+}
+
+function downloadReceiptPDF(txId) {
+    window.open(`/api/transaction/${txId}/receipt/pdf`, '_blank');
+}
+
+function loadFinancialInsights() {
+    fetch('/api/analytics/insights')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const ins = data.insights;
+                document.getElementById('insightSpending').innerText = 'Rs ' + ins.monthly_spending.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('insightIncome').innerText = 'Rs ' + ins.monthly_income.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('insightSavings').innerText = 'Rs ' + ins.savings.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('insightLargest').innerText = 'Rs ' + ins.largest_expense.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                document.getElementById('insightComparison').innerText = ins.comparison_message;
+            }
+        });
+}
+
+function switchAnalyticsChart() {
+    const type = document.getElementById('analyticsChartSelect').value;
+    const ctx = document.getElementById('clientSpendChart');
+    if (!ctx || !cachedAnalytics) return;
+    
+    if (clientSpendChartInstance) {
+        clientSpendChartInstance.destroy();
+    }
+    
+    let labels = [];
+    let data = [];
+    let labelName = "";
+    let bgColor = "";
+    let borderColor = "";
+    
+    if (type === 'spend') {
+        renderClientSpendChart(currentTxs);
+        document.getElementById('chartDesc').innerHTML = `Total Spends in the last 30 days: Rs <span id="monthlySpendsValue">${cachedAnalytics.monthly_withdrawals.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>`;
+        return;
+    }
+    
+    if (type === 'deposits') {
+        labels = ['Last 30 Days'];
+        data = [cachedAnalytics.monthly_deposits];
+        labelName = 'Monthly Deposits (Rs)';
+        bgColor = 'rgba(16, 185, 129, 0.4)';
+        borderColor = '#10b981';
+        document.getElementById('chartDesc').innerHTML = `Deposits credited in last 30 days: Rs <span>${cachedAnalytics.monthly_deposits.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>`;
+    } else if (type === 'withdrawals') {
+        labels = ['Last 30 Days'];
+        data = [cachedAnalytics.monthly_withdrawals];
+        labelName = 'Monthly Withdrawals (Rs)';
+        bgColor = 'rgba(244, 63, 94, 0.4)';
+        borderColor = '#f43f5e';
+        document.getElementById('chartDesc').innerHTML = `Withdrawals debited in last 30 days: Rs <span>${cachedAnalytics.monthly_withdrawals.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>`;
+    } else if (type === 'transfers') {
+        labels = ['Last 30 Days'];
+        data = [cachedAnalytics.monthly_transfers];
+        labelName = 'Monthly Transfers (Rs)';
+        bgColor = 'rgba(155, 93, 229, 0.4)';
+        borderColor = '#9b5de5';
+        document.getElementById('chartDesc').innerHTML = `Transfers sent in last 30 days: Rs <span>${cachedAnalytics.monthly_transfers.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>`;
+    } else if (type === 'fraud') {
+        labels = ['Blocked Attempts', 'High Risk Tx'];
+        data = [cachedAnalytics.fraud_attempts, cachedAnalytics.high_risk_transactions];
+        labelName = 'Risk Events (Count)';
+        bgColor = 'rgba(239, 68, 68, 0.4)';
+        borderColor = '#ef4444';
+        document.getElementById('chartDesc').innerHTML = `Risk management blockages and warnings in last 30 days`;
+    } else if (type === 'trend') {
+        const trend = cachedAnalytics.balance_trend || [];
+        labels = trend.map(t => new Date(t.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        data = trend.map(t => t.balance);
+        labelName = 'Account Balance History (Rs)';
+        bgColor = 'rgba(6, 182, 212, 0.2)';
+        borderColor = '#06b6d4';
+        document.getElementById('chartDesc').innerHTML = `Chronological balance movements for verified transactions`;
+    }
+    
+    clientSpendChartInstance = new Chart(ctx, {
+        type: type === 'trend' ? 'line' : 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: labelName,
+                data: data,
+                backgroundColor: bgColor,
+                borderColor: borderColor,
+                borderWidth: 1.5,
+                borderRadius: 4,
+                fill: type === 'trend'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true }
+            }
+        }
+    });
+}
+
+let currentSecurityTab = 'sessions';
+function switchSecurityTab(tab) {
+    currentSecurityTab = tab;
+    
+    document.getElementById('secTabSessionsBtn').classList.toggle('active', tab === 'sessions');
+    document.getElementById('secTabDevicesBtn').classList.toggle('active', tab === 'devices');
+    document.getElementById('secTabHistoryBtn').classList.toggle('active', tab === 'history');
+    
+    document.getElementById('secPaneSessions').classList.toggle('hidden', tab !== 'sessions');
+    document.getElementById('secPaneDevices').classList.toggle('hidden', tab !== 'devices');
+    document.getElementById('secPaneHistory').classList.toggle('hidden', tab !== 'history');
+    
+    if (tab === 'sessions') {
+        loadSessions();
+    } else if (tab === 'devices') {
+        loadTrustedDevices();
+    } else if (tab === 'history') {
+        loadLoginHistory();
+    }
+}
+
+function loadTrustedDevices() {
+    fetch('/api/security/devices')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const tbody = document.getElementById('trustedDevicesTableBody');
+                tbody.innerHTML = '';
+                if (data.devices.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No trusted devices found.</td></tr>';
+                    return;
+                }
+                data.devices.forEach(d => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${escapeHtml(d.browser)}</td>
+                        <td>${escapeHtml(d.os)}</td>
+                        <td>${formatDate(d.last_login_at)}</td>
+                        <td>
+                            <button class="btn btn-danger btn-sm" onclick="revokeDevice(${d.id})" style="padding: 2px 6px; font-size: 0.75rem; border-radius: 4px;">Revoke</button>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+        });
+}
+
+function revokeDevice(id) {
+    if (!confirm('Are you sure you want to revoke trust for this device? You will need to enter an OTP code on your next login.')) return;
+    fetch(`/api/security/devices/${id}`, { method: 'DELETE' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showToast('Device Revoked', data.message, 'success');
+                loadTrustedDevices();
+            } else {
+                showToast('Error', data.message, 'error');
+            }
+        });
+}
+
+function loadLoginHistory() {
+    fetch('/api/security/login-history')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const tbody = document.getElementById('loginHistoryTableBody');
+                tbody.innerHTML = '';
+                if (data.history.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No login logs recorded.</td></tr>';
+                    return;
+                }
+                data.history.forEach(h => {
+                    const row = document.createElement('tr');
+                    const badgeClass = h.status === 'ACTIVE' || h.status === 'SUCCESS' ? 'badge-success' : 'badge-danger';
+                    row.innerHTML = `
+                        <td>${formatDate(h.timestamp)}</td>
+                        <td>${escapeHtml(h.ip_address)}</td>
+                        <td>${escapeHtml(h.browser)} (${escapeHtml(h.os)})</td>
+                        <td><span class="badge ${badgeClass}">${escapeHtml(h.status)}</span></td>
+                        <td>${escapeHtml(h.country)}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+        });
+}
+
+function handlePasswordUpdate(e) {
+    e.preventDefault();
+    const current_password = document.getElementById('pwdCurrent').value;
+    const new_password = document.getElementById('pwdNew').value;
+    const confirm_password = document.getElementById('pwdConfirm').value;
+    
+    if (new_password !== confirm_password) {
+        showToast('Password Error', 'New passwords do not match.', 'error');
+        return;
+    }
+    
+    fetch('/api/profile/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password, new_password, confirm_password })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            showToast('Password Updated', data.message, 'success');
+            document.getElementById('pwdCurrent').value = '';
+            document.getElementById('pwdNew').value = '';
+            document.getElementById('pwdConfirm').value = '';
+        } else {
+            showToast('Password Update Error', data.message || 'Failed to update password.', 'error');
+        }
+    })
+    .catch(() => showToast('Network Error', 'Could not establish connection.', 'error'));
 }

@@ -2063,9 +2063,379 @@ class BankAppTestCase(unittest.TestCase):
         res = self.client.get('/api/admin/analytics/stats')
         self.assertEqual(res.status_code, 401)
 
+    def test_registration_succeeds_even_if_smtp_fails(self):
+        import app as app_module
+        original_send_email = app_module.send_email
+        
+        def fail_send(*args, **kwargs):
+            raise Exception("SMTP Server Unavailable")
+        app_module.send_email = fail_send
+        
+        try:
+            res = self.register_user("smtp_fail_reg", "smtp@fail.com", "pwd123", "pwd123", "999")
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertEqual(data['status'], 'success')
+        finally:
+            app_module.send_email = original_send_email
+
+    def test_deposit_succeeds_even_if_smtp_fails(self):
+        import app as app_module
+        original_send_email = app_module.send_email
+        
+        def fail_send(*args, **kwargs):
+            raise Exception("SMTP Server Unavailable")
+        app_module.send_email = fail_send
+        
+        try:
+            self.register_user("deposit_fail_mail", "dep@fail.com", "pwd", "pwd", "123")
+            self.login_user("deposit_fail_mail", "pwd")
+            
+            res = self.client.post('/api/add-money/initiate', json={
+                "amount": 2000,
+                "method": "UPI",
+                "gateway": "Google Pay",
+                "remarks": "Low risk deposit"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertEqual(data['status'], 'success')
+        finally:
+            app_module.send_email = original_send_email
+
+    def test_withdrawal_succeeds_even_if_smtp_fails(self):
+        import app as app_module
+        original_send_email = app_module.send_email
+        
+        def fail_send(*args, **kwargs):
+            raise Exception("SMTP Server Unavailable")
+        app_module.send_email = fail_send
+        
+        try:
+            self.register_user("withdraw_fail_mail", "w@fail.com", "pwd", "pwd", "123")
+            self.login_user("withdraw_fail_mail", "pwd")
+            
+            res = self.client.post('/api/transfer/initiate', json={
+                "receiver": "ATM_01",
+                "amount": 100,
+                "type": "CASH_OUT",
+                "remarks": "Low risk cash out"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertEqual(data['status'], 'success')
+        finally:
+            app_module.send_email = original_send_email
+
+    def test_transfer_succeeds_even_if_smtp_fails(self):
+        import app as app_module
+        original_send_email = app_module.send_email
+        
+        def fail_send(*args, **kwargs):
+            raise Exception("SMTP Server Unavailable")
+        app_module.send_email = fail_send
+        
+        try:
+            self.register_user("tx_fail_sender", "s_tx@fail.com", "pwd", "pwd", "123")
+            self.register_user("tx_fail_rec", "r_tx@fail.com", "pwd", "pwd", "456")
+            self.login_user("tx_fail_sender", "pwd")
+            
+            res = self.client.post('/api/transfer/initiate', json={
+                "receiver": "tx_fail_rec",
+                "amount": 100,
+                "remarks": "Low risk transfer"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertEqual(data['status'], 'success')
+        finally:
+            app_module.send_email = original_send_email
+
+    def test_otp_emails_continue_working_unchanged(self):
+        self.register_user("otp_user", "otp@test.com", "pwd", "pwd", "123")
+        self.login_user("otp_user", "pwd")
+        
+        res = self.client.post('/api/add-money/initiate', json={
+            "amount": 25000,
+            "method": "UPI",
+            "gateway": "Google Pay"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertTrue(data['otp_required'])
+        
+        token = data['reference_id']
+        res_resend = self.client.post('/api/otp/resend', json={"transaction_token": token})
+        self.assertEqual(res_resend.status_code, 200)
+        data_resend = json.loads(res_resend.data)
+        self.assertEqual(data_resend['status'], 'success')
+
+    def test_correct_recipient_email_used(self):
+        import app as app_module
+        recipient_captured = []
+        original_send_email = app_module.send_email
+        
+        def capture_recipient(recipient_email, subject, plain_text, html_body=None):
+            recipient_captured.append(recipient_email)
+            return True
+        app_module.send_email = capture_recipient
+        
+        try:
+            self.register_user("rec_check", "correct_rec@test.com", "pwd", "pwd", "123")
+            self.assertEqual(recipient_captured[-1], "correct_rec@test.com")
+            
+            self.login_user("rec_check", "pwd")
+            self.client.post('/api/add-money/initiate', json={
+                "amount": 1000,
+                "method": "UPI",
+                "gateway": "Google Pay"
+            })
+            self.assertIn("correct_rec@test.com", recipient_captured)
+        finally:
+            app_module.send_email = original_send_email
+
+    def test_password_change_route_and_email(self):
+        import app as app_module
+        email_sent = []
+        original_send_email = app_module.send_email
+        
+        def capture_email(recipient_email, subject, plain_text, html_body=None):
+            email_sent.append((recipient_email, subject))
+            return True
+        app_module.send_email = capture_email
+        
+        try:
+            self.register_user("pw_user", "pw_change@test.com", "old_pwd", "old_pwd", "123")
+            self.login_user("pw_user", "old_pwd")
+            
+            res = self.client.post('/api/profile/update', json={
+                "current_password": "old_pwd",
+                "new_password": "new_pwd123",
+                "confirm_password": "new_pwd123"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertEqual(data['status'], 'success')
+            
+            self.assertTrue(any(item[0] == "pw_change@test.com" and "Password Changed" in item[1] for item in email_sent))
+        finally:
+            app_module.send_email = original_send_email
+
+
+
+    def test_pdf_bank_statement_generation(self):
+        self.register_user("statement_user", "statement@test.com", "pass123", "pass123", "123")
+        self.login_user("statement_user", "pass123")
+        res = self.client.get('/api/statement/download?start_date=2026-07-01&end_date=2026-07-31')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.mimetype, 'application/pdf')
+        self.assertTrue(res.data.startswith(b'%PDF'))
+
+    def test_dashboard_analytics_api(self):
+        self.register_user("analytics_user", "analytics@test.com", "pass123", "pass123", "123")
+        self.login_user("analytics_user", "pass123")
+        res = self.client.get('/api/analytics/dashboard')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertIn('monthly_deposits', data['analytics'])
+        self.assertIn('balance_trend', data['analytics'])
+
+    def test_financial_insights_api(self):
+        self.register_user("insights_user", "insights@test.com", "pass123", "pass123", "123")
+        self.login_user("insights_user", "pass123")
+        res = self.client.get('/api/analytics/insights')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertIn('monthly_spending', data['insights'])
+        self.assertIn('comparison_message', data['insights'])
+
+    def test_login_history_records(self):
+        self.register_user("history_user", "history@test.com", "pass123", "pass123", "123")
+        self.login_user("history_user", "pass123")
+        res = self.client.get('/api/security/login-history')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertTrue(len(data['history']) > 0)
+
+    def test_device_recognition_and_otp_bypass(self):
+        self.register_user("device_user", "device@test.com", "pass123", "pass123", "123")
+        res = self.client.post('/api/login', json={"username": "device_user", "password": "pass123"}, headers={"X-Device-Fingerprint": "dev_fingerprint_123"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        res = self.client.post('/api/login', json={"username": "device_user", "password": "pass123"}, headers={"X-Device-Fingerprint": "dev_fingerprint_123"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+
+    def test_audit_logging_and_csv_export(self):
+        self.register_user("auditor", "auditor@test.com", "audit123", "audit123", "123")
+        self.login_user("auditor", "audit123")
+        res = self.client.get('/api/admin/audit-logs')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        res = self.client.get('/api/admin/audit-logs/export')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.mimetype, 'text/csv')
+
+    def test_pdf_receipt_generation(self):
+        self.register_user("receipt_user", "receipt@test.com", "pass123", "pass123", "123")
+        self.login_user("receipt_user", "pass123")
+        res = self.client.post('/api/add-money/initiate', json={
+            "amount": 1000,
+            "method": "UPI",
+            "gateway": "Google Pay"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        res = self.client.get(f'/api/transaction/1/receipt')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        res = self.client.get(f'/api/transaction/1/receipt/pdf')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.mimetype, 'application/pdf')
+
+    def test_password_change_session_invalidation(self):
+        self.register_user("session_user", "session@test.com", "pass123", "pass123", "123")
+        self.login_user("session_user", "pass123")
+        res = self.client.post('/api/profile/update', json={
+            "current_password": "pass123",
+            "new_password": "new_password_123",
+            "confirm_password": "new_password_123"
+        })
+        self.assertEqual(res.status_code, 200)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM login_history WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'session_user')")
+        count = cursor.fetchone()['count']
+        conn.close()
+        self.assertTrue(count <= 1)
+
+
+
+    @patch('app.decode_base64_image')
+    @patch('app.validate_face_quality')
+    @patch('app.extract_face_embedding')
+    def test_biometric_enroll_5_samples(self, mock_extract, mock_quality, mock_decode):
+        import numpy as np
+        mock_extract.return_value = [0.1] * 128
+        mock_decode.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
+        mock_quality.return_value = {"status": "success", "face": [0,0,200,200, 50,50, 150,50, 100,100, 70,150, 130,150, 0.99]}
+        
+        self.register_user('enroll_5_user', 'enroll5@test.com', 'pass123', 'pass123', '999')
+        self.login_user('enroll_5_user', 'pass123')
+        
+        res = self.client.post('/api/biometric/enroll', json={
+            "images": ["img1", "img2", "img3", "img4", "img5"]
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT image_path, image_hash, width, height FROM face_samples WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'enroll_5_user')")
+        samples = cursor.fetchall()
+        self.assertEqual(len(samples), 5)
+        for s in samples:
+            self.assertTrue(os.path.exists(s['image_path']))
+            self.assertEqual(s['width'], 640)
+            self.assertEqual(s['height'], 480)
+            self.assertTrue(len(s['image_hash']) > 0)
+        conn.close()
+
+    @patch('app.decode_base64_image')
+    @patch('app.validate_face_quality')
+    @patch('app.extract_face_embedding')
+    @patch('app.check_liveness_challenge')
+    @patch('app.calculate_similarity')
+    def test_biometric_verification_save_image(self, mock_similarity, mock_liveness, mock_extract, mock_quality, mock_decode):
+        import numpy as np
+        mock_decode.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
+        mock_quality.return_value = {"status": "success", "face": [0,0,200,200, 50,50, 150,50, 100,100, 70,150, 130,150, 0.99]}
+        mock_extract.return_value = [0.1] * 128
+        mock_liveness.return_value = True
+        mock_similarity.return_value = (True, 0.9, 0.363)
+        
+        self.register_user('verify_save_user', 'verifysave@test.com', 'pass123', 'pass123', '999')
+        self.login_user('verify_save_user', 'pass123')
+        
+        self.client.post('/api/biometric/enroll', json={
+            "images": ["img1", "img2", "img3", "img4", "img5"]
+        })
+        
+        self.client.post('/api/biometric/verify/initiate')
+        
+        res = self.client.post('/api/biometric/verify/check', json={
+            "image": "img_verify"
+        })
+        self.assertEqual(res.status_code, 200)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT image_path, image_hash, width, height FROM face_verification_attempts WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'verify_save_user') AND verification_result = 'SUCCESS'")
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        self.assertTrue(os.path.exists(row['image_path']))
+        self.assertEqual(row['width'], 640)
+        self.assertEqual(row['height'], 480)
+        conn.close()
+
+    @patch('app.decode_base64_image')
+    @patch('app.validate_face_quality')
+    @patch('app.extract_face_embedding')
+    def test_admin_face_debug_endpoint(self, mock_extract, mock_quality, mock_decode):
+        import numpy as np
+        mock_decode.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
+        mock_quality.return_value = {"status": "success", "face": [0,0,200,200, 50,50, 150,50, 100,100, 70,150, 130,150, 0.99]}
+        mock_extract.return_value = [0.1] * 128
+        
+        self.register_user('debug_user', 'debug_user@test.com', 'pass123', 'pass123', '999')
+        self.login_user('debug_user', 'pass123')
+        
+        self.client.post('/api/biometric/enroll', json={
+            "images": ["img1", "img2", "img3", "img4", "img5"]
+        })
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = 'debug_user'")
+        debug_user_id = cursor.fetchone()['ID']
+        conn.close()
+        
+        res = self.client.get(f'/api/admin/face/debug/{debug_user_id}')
+        self.assertEqual(res.status_code, 403)
+        
+        self.register_user('admin_user', 'admin@test.com', 'admin123', 'admin123', '999')
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = 'admin_user'")
+        admin_user_id = cursor.fetchone()['ID']
+        conn.close()
+        
+        with self.client.session_transaction() as sess:
+            sess['username'] = 'admin_user'
+            sess['user_id'] = admin_user_id
+            sess['is_admin'] = True
+            
+        res = self.client.get(f'/api/admin/face/debug/{debug_user_id}')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertTrue(len(data['samples']) > 0)
+        self.assertEqual(data['user_id'], debug_user_id)
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
 
 
