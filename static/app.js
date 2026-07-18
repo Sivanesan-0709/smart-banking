@@ -1992,7 +1992,11 @@ function updateGatewayOptions() {
 }
 
 function startDepositVerification() {
-    const amount = parseFloat(document.getElementById('depositAmount').value);
+    let rawAmount = document.getElementById('depositAmount').value;
+    if (typeof rawAmount === 'string') {
+        rawAmount = rawAmount.replace(/[₹\s,]/g, '');
+    }
+    const amount = parseFloat(rawAmount);
     const method = document.getElementById('depositMethod').value;
     const gateway = document.getElementById('depositGateway').value;
     const remarks = document.getElementById('depositRemarks').value.trim();

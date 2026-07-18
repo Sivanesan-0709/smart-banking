@@ -196,6 +196,20 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
         print(f"[ERROR] Failed to send email to {recipient_email}: {e}", flush=True)
         return False
 
+def clean_and_parse_amount(val):
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val_str = str(val).strip()
+    # Keep only digits and decimal point using regular expression
+    import re
+    clean_str = re.sub(r'[^\d\.]', '', val_str)
+    try:
+        return float(clean_str)
+    except ValueError:
+        raise ValueError("Invalid amount format")
+
 def build_html_email(body_html_content):
     return f"""<!DOCTYPE html>
 <html>
@@ -462,10 +476,29 @@ def load_ml_model():
 def load_face_models():
     global face_detector, face_recognizer
     
-    os.makedirs('models', exist_ok=True)
-    yunet_path = os.path.join('models', 'face_detection_yunet_2023mar.onnx')
-    sface_path = os.path.join('models', 'face_recognition_sface_2021dec.onnx')
+    print("\n[STARTUP] ----- BIOMETRIC MODEL INITIALIZATION -----", flush=True)
+    print(f"[STARTUP] OpenCV Version: {cv2.__version__}", flush=True)
     
+    models_dir = os.path.join(str(BASE_DIR), 'models')
+    os.makedirs(models_dir, exist_ok=True)
+    
+    yunet_path = os.path.join(models_dir, 'face_detection_yunet_2023mar.onnx')
+    sface_path = os.path.join(models_dir, 'face_recognition_sface_2021dec.onnx')
+    
+    print(f"[STARTUP] Resolved Detector Path: {yunet_path}", flush=True)
+    print(f"[STARTUP] Resolved Recognizer Path: {sface_path}", flush=True)
+    
+    yunet_exists = os.path.exists(yunet_path)
+    sface_exists = os.path.exists(sface_path)
+    
+    print(f"[STARTUP] Detector Model File Exists: {yunet_exists}", flush=True)
+    print(f"[STARTUP] Recognizer Model File Exists: {sface_exists}", flush=True)
+    
+    if yunet_exists:
+        print(f"[STARTUP] Detector File Size: {os.path.getsize(yunet_path)} bytes", flush=True)
+    if sface_exists:
+        print(f"[STARTUP] Recognizer File Size: {os.path.getsize(sface_path)} bytes", flush=True)
+        
     yunet_url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
     sface_url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
     
@@ -473,28 +506,55 @@ def load_face_models():
     
     def download_file(url, dest):
         if not os.path.exists(dest):
-            print(f"Downloading {os.path.basename(dest)}... (this happens once)")
+            print(f"[STARTUP] Downloading {os.path.basename(dest)}... (this happens once)", flush=True)
             try:
-                urllib.request.urlretrieve(url, dest)
-                print(f"Successfully downloaded {os.path.basename(dest)}.")
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                )
+                with urllib.request.urlopen(req, timeout=30.0) as response, open(dest, 'wb') as out_file:
+                    out_file.write(response.read())
+                print(f"[STARTUP] Successfully downloaded {os.path.basename(dest)}.", flush=True)
             except Exception as e:
-                print(f"Failed to download {os.path.basename(dest)}: {e}")
+                print(f"[STARTUP] [ERROR] Failed to download {os.path.basename(dest)}: {e}", flush=True)
+                traceback.print_exc()
                 
-    download_file(yunet_url, yunet_path)
-    download_file(sface_url, sface_path)
+    if not yunet_exists:
+        download_file(yunet_url, yunet_path)
+        yunet_exists = os.path.exists(yunet_path)
+        
+    if not sface_exists:
+        download_file(sface_url, sface_path)
+        sface_exists = os.path.exists(sface_path)
+        
+    detector_ok = False
+    recognizer_ok = False
     
-    if os.path.exists(yunet_path) and os.path.exists(sface_path):
+    if yunet_exists and sface_exists:
         try:
-            # Score threshold: 0.9, NMS threshold: 0.3, top K: 5000
             face_detector = cv2.FaceDetectorYN.create(yunet_path, "", (320, 320), 0.9, 0.3, 5000)
-            face_recognizer = cv2.FaceRecognizerSF.create(sface_path, "")
-            print("OpenCV YuNet face detector and SFace recognizer loaded successfully.")
+            detector_ok = True
+            print("[STARTUP] OpenCV YuNet face detector initialized successfully.", flush=True)
         except Exception as e:
-            print(f"Error initializing OpenCV Face models: {e}")
+            print(f"[STARTUP] [ERROR] Failed to initialize OpenCV YuNet face detector: {e}", flush=True)
+            traceback.print_exc()
             face_detector = None
+            
+        try:
+            face_recognizer = cv2.FaceRecognizerSF.create(sface_path, "")
+            recognizer_ok = True
+            print("[STARTUP] OpenCV SFace face recognizer initialized successfully.", flush=True)
+        except Exception as e:
+            print(f"[STARTUP] [ERROR] Failed to initialize OpenCV SFace face recognizer: {e}", flush=True)
+            traceback.print_exc()
             face_recognizer = None
     else:
-        print("Face ONNX models are missing and could not be downloaded.")
+        print("[STARTUP] [ERROR] Face ONNX models are missing and could not be loaded or downloaded.", flush=True)
+        face_detector = None
+        face_recognizer = None
+        
+    print(f"[STARTUP] Biometric status -> Detector: {'SUCCESS' if detector_ok else 'FAILED'}, Recognizer: {'SUCCESS' if recognizer_ok else 'FAILED'}", flush=True)
+    print("--------------------------------------------------\n", flush=True)
 
 def is_login_rate_limited(username):
     conn = get_db_connection()
@@ -2367,7 +2427,7 @@ def transfer_initiate():
         ttype = data.get('type', 'TRANSFER').strip().upper()
 
         try:
-            amount = float(amount_str)
+            amount = clean_and_parse_amount(amount_str)
         except ValueError:
             print("END /api/transfer/initiate", flush=True)
             print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
@@ -3220,17 +3280,35 @@ def biometric_diagnostics():
     if 'username' not in session or not session.get('is_admin', False):
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
         
-    yunet_path = os.path.join('models', 'face_detection_yunet_2023mar.onnx')
-    sface_path = os.path.join('models', 'face_recognition_sface_2021dec.onnx')
+    models_dir = os.path.join(str(BASE_DIR), 'models')
+    yunet_path = os.path.join(models_dir, 'face_detection_yunet_2023mar.onnx')
+    sface_path = os.path.join(models_dir, 'face_recognition_sface_2021dec.onnx')
+    
+    detector_exists = os.path.exists(yunet_path)
+    recognizer_exists = os.path.exists(sface_path)
     
     return jsonify({
         "status": "success",
         "detector_loaded": face_detector is not None,
         "recognizer_loaded": face_recognizer is not None,
-        "detector_model_filename": os.path.basename(yunet_path) if os.path.exists(yunet_path) else "missing",
-        "recognizer_model_filename": os.path.basename(sface_path) if os.path.exists(sface_path) else "missing",
-        "detector_model_exists": os.path.exists(yunet_path),
-        "recognizer_model_exists": os.path.exists(sface_path)
+        "detector_model_filename": os.path.basename(yunet_path) if detector_exists else "missing",
+        "recognizer_model_filename": os.path.basename(sface_path) if recognizer_exists else "missing",
+        "detector_model_exists": detector_exists,
+        "recognizer_model_exists": recognizer_exists,
+        "detector_file_size": os.path.getsize(yunet_path) if detector_exists else 0,
+        "recognizer_file_size": os.path.getsize(sface_path) if recognizer_exists else 0,
+        "opencv_version": cv2.__version__
+    })
+
+@app.route('/api/biometric/health', methods=['GET'])
+def biometric_health():
+    if 'username' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    
+    return jsonify({
+        "status": "success",
+        "detector_initialized": face_detector is not None,
+        "recognizer_initialized": face_recognizer is not None
     })
 
 @app.route('/api/admin/reviews', methods=['GET'])
@@ -3776,7 +3854,11 @@ def add_money_initiate():
         if not data:
             return jsonify({"status": "error", "message": "Missing request payload."}), 400
             
-        amount = float(data.get('amount', 0))
+        amount_raw = data.get('amount', 0)
+        try:
+            amount = clean_and_parse_amount(amount_raw)
+        except ValueError:
+            return jsonify({"status": "error", "message": "Invalid transaction amount format."}), 400
         method = data.get('method', '').strip()
         gateway = data.get('gateway', '').strip()
         remarks = data.get('remarks', '').strip()
@@ -6193,6 +6275,10 @@ Thank you for choosing Smart Banking.
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+# Initialize ML and Face Models at startup
+load_ml_model()
+load_face_models()
 
 if __name__ == '__main__':
     init_db()

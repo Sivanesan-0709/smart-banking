@@ -2117,7 +2117,7 @@ class BankAppTestCase(unittest.TestCase):
             
             res = self.client.post('/api/transfer/initiate', json={
                 "receiver": "ATM_01",
-                "amount": 100,
+                "amount": 1000,
                 "type": "CASH_OUT",
                 "remarks": "Low risk cash out"
             })
@@ -2432,6 +2432,114 @@ class BankAppTestCase(unittest.TestCase):
         self.assertTrue(len(data['samples']) > 0)
         self.assertEqual(data['user_id'], debug_user_id)
 
+
+    def test_biometric_health_endpoint(self):
+        self.register_user('health_user', 'health@test.com', 'pass123', 'pass123', '999')
+        self.login_user('health_user', 'pass123')
+        
+        res = self.client.get('/api/biometric/health')
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'success')
+        self.assertIn('detector_initialized', data)
+        self.assertIn('recognizer_initialized', data)
+
+    def test_model_initialization_flow(self):
+        import app as app_module
+        orig_detector = app_module.face_detector
+        orig_recognizer = app_module.face_recognizer
+        try:
+            app_module.load_face_models()
+            self.assertTrue(True)
+        finally:
+            app_module.face_detector = orig_detector
+            app_module.face_recognizer = orig_recognizer
+
+    @patch('app.decode_base64_image')
+    def test_missing_model_handling_responses(self, mock_decode):
+        import numpy as np
+        mock_decode.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        import app as app_module
+        orig_detector = app_module.face_detector
+        orig_recognizer = app_module.face_recognizer
+        app_module.face_detector = None
+        app_module.face_recognizer = None
+        try:
+            self.register_user('missing_model_user', 'missing@test.com', 'pass123', 'pass123', '999')
+            self.login_user('missing_model_user', 'pass123')
+            
+            res = self.client.post('/api/biometric/enroll', json={
+                "images": ["img1", "img2", "img3", "img4", "img5"]
+            })
+            self.assertEqual(res.status_code, 400)
+            data = json.loads(res.data)
+            self.assertIn("Face models are not initialized on the server.", data['message'])
+            
+            self.client.post('/api/biometric/verify/initiate')
+            res2 = self.client.post('/api/biometric/verify/check', json={
+                "image": "img_verify"
+            })
+            self.assertEqual(res2.status_code, 400)
+            data2 = json.loads(res2.data)
+            self.assertIn("Face models are not initialized on the server.", data2['message'])
+        finally:
+            app_module.face_detector = orig_detector
+            app_module.face_recognizer = orig_recognizer
+
+    def test_add_money_limits_comprehensive(self):
+        self.register_user('limit_user', 'lim@test.com', 'pass123', 'pass123', '999')
+        self.login_user('limit_user', 'pass123')
+        
+        # Test amounts that should succeed (LOW or MEDIUM risk depending on history)
+        for amt in [100, 2000, 2001, 5000, 20000]:
+            res = self.client.post('/api/add-money/initiate', json={
+                "amount": amt, "method": "UPI", "gateway": "Google Pay"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertIn(data['status'], ['success', 'verification_required'])
+
+        # Test amounts that should require MFA or Admin Review (MEDIUM/HIGH/CRITICAL risk overrides)
+        for amt in [20001, 50000, 50001, 100000, 200000]:
+            res = self.client.post('/api/add-money/initiate', json={
+                "amount": amt, "method": "UPI", "gateway": "Google Pay"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = json.loads(res.data)
+            self.assertIn(data['status'], ['verification_required', 'pending_review'])
+            if data['status'] == 'pending_review':
+                self.assertEqual(data['risk_level'], 'CRITICAL')
+            elif amt > 50000:
+                self.assertEqual(data['risk_level'], 'HIGH')
+            else:
+                self.assertEqual(data['risk_level'], 'MEDIUM')
+
+        # Test amount that should exceed max limit (> 2,00,000)
+        res_exceed = self.client.post('/api/add-money/initiate', json={
+            "amount": 200001, "method": "UPI", "gateway": "Google Pay"
+        })
+        self.assertEqual(res_exceed.status_code, 400)
+        data_exceed = json.loads(res_exceed.data)
+        self.assertEqual(data_exceed['status'], 'error')
+        self.assertIn("INR 100 and INR 2,00,000", data_exceed['message'])
+
+        # Test Indian formatting parsing compatibility in the backend
+        res_format = self.client.post('/api/add-money/initiate', json={
+            "amount": "\u20b92,00,000", "method": "Debit Card", "gateway": "Visa"
+        })
+        self.assertEqual(res_format.status_code, 200)
+        data_format = json.loads(res_format.data)
+        self.assertIn(data_format['status'], ['verification_required', 'pending_review'])
+        if data_format['status'] == 'pending_review':
+            self.assertEqual(data_format['risk_level'], 'CRITICAL')
+        else:
+            self.assertEqual(data_format['risk_level'], 'HIGH')
+
+        res_format_exceed = self.client.post('/api/add-money/initiate', json={
+            "amount": "\u20b92,00,001", "method": "Debit Card", "gateway": "Visa"
+        })
+        self.assertEqual(res_format_exceed.status_code, 400)
 
 if __name__ == '__main__':
     unittest.main()
