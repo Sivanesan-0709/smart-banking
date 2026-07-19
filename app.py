@@ -112,7 +112,7 @@ def check_session_validity():
         conn.close()
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=None)
 
-is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+is_test = ('unittest' in sys.modules or os.environ.get('TESTING') == '1') and os.environ.get('TEST_PROD_SIMULATION') != '1'
 is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
 
 secret_key = os.environ.get('SECRET_KEY')
@@ -146,18 +146,32 @@ def verify_otp_hmac(input_otp, stored_hash):
     computed_hash = hash_otp(input_otp)
     return hmac.compare_digest(stored_hash, computed_hash)
 
+def is_valid_email(email):
+    if not email:
+        return False
+    import re
+    regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+    return bool(re.match(regex, email))
+
 def send_email(recipient_email, subject, plain_text, html_body=None):
-    smtp_host = os.environ.get('SMTP_HOST')
-    smtp_port = os.environ.get('SMTP_PORT')
-    smtp_username = os.environ.get('SMTP_USERNAME')
-    smtp_password = os.environ.get('SMTP_PASSWORD')
-    smtp_from = os.environ.get('SMTP_FROM_EMAIL', smtp_username)
-    smtp_use_tls = os.environ.get('SMTP_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+    import urllib.request
+    import urllib.error
+    import json
+    import sys
+    import os
     
-    is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+    if not is_valid_email(recipient_email):
+        print(f"[ERROR] Invalid recipient email format: {recipient_email}", flush=True)
+        return False
+        
+    resend_api_key = os.environ.get('RESEND_API_KEY')
+    resend_from = os.environ.get('RESEND_FROM_EMAIL', 'onboarding@resend.dev')
+    
+    is_test = ('unittest' in sys.modules or os.environ.get('TESTING') == '1') and os.environ.get('TEST_PROD_SIMULATION') != '1'
     is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
     
-    if not smtp_host or not smtp_username or not smtp_password:
+    # Fallback to local mock printing if Resend is not configured in test or dev mode
+    if not resend_api_key:
         if is_test or is_dev:
             print(f"[DEBUG] [MOCK EMAIL] To: {recipient_email} | Subject: {subject}", flush=True)
             print(f"Plain Text:\n{plain_text}", flush=True)
@@ -165,35 +179,40 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
                 print(f"HTML:\n{html_body[:200]}...", flush=True)
             return True
         else:
-            print("[ERROR] SMTP environment variables are missing.", flush=True)
+            print("[ERROR] Resend API key is missing in production environment.", flush=True)
             return False
-            
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = smtp_from
-    msg['To'] = recipient_email
-    
-    msg.set_content(plain_text)
+
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {resend_api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "from": resend_from,
+        "to": [recipient_email],
+        "subject": subject,
+        "text": plain_text
+    }
     if html_body:
-        msg.add_alternative(html_body, subtype='html')
+        payload["html"] = html_body
         
     try:
-        if smtp_use_tls:
-            server = smtplib.SMTP(smtp_host, int(smtp_port) if smtp_port else 587, timeout=10.0)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-        else:
-            server = smtplib.SMTP_SSL(smtp_host, int(smtp_port) if smtp_port else 465, timeout=10.0)
-            server.ehlo()
-            
-        server.login(smtp_username, smtp_password)
-        server.send_message(msg)
-        server.quit()
-        print(f"[INFO] Email successfully sent to {recipient_email} with subject: {subject}", flush=True)
-        return True
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=10.0) as response:
+            res_body = response.read().decode('utf-8')
+            print(f"[INFO] Resend email successfully delivered to {recipient_email}.", flush=True)
+            return True
+    except urllib.error.HTTPError as e:
+        err_content = e.read().decode('utf-8')
+        print(f"[ERROR] Resend HTTP Error {e.code} during email delivery.", flush=True)
+        return False
     except Exception as e:
-        print(f"[ERROR] Failed to send email to {recipient_email}: {e}", flush=True)
+        print("[ERROR] Network/Connection failure during Resend email delivery.", flush=True)
         return False
 
 def clean_and_parse_amount(val):
@@ -247,7 +266,7 @@ def build_html_email(body_html_content):
 </html>"""
 
 def dispatch_email_async(recipient_email, subject, plain_text, html_body=None):
-    is_test = 'unittest' in sys.modules or os.environ.get('TESTING') == '1'
+    is_test = ('unittest' in sys.modules or os.environ.get('TESTING') == '1') and os.environ.get('TEST_PROD_SIMULATION') != '1'
     if is_test:
         try:
             send_email(recipient_email, subject, plain_text, html_body)
@@ -392,8 +411,7 @@ If you did not initiate this transaction, please log in to your account and chan
 <p>This code is valid for exactly <strong>5 minutes</strong>. Do NOT share this code with anyone, including bank representatives.</p>
 <p>If you did not initiate this transaction, please log in to your account and change your password immediately.</p>
 """
-    dispatch_email_async(recipient_email, subject, plain_text, html_body)
-    return True
+    return send_email(recipient_email, subject, plain_text, html_body)
 
 MODEL_PATH = str(BASE_DIR / 'banking_app_rf.pkl')
 METRICS_PATH = str(BASE_DIR / 'model_metrics.json')
@@ -1544,13 +1562,22 @@ def login():
                     session['login_otp_hash'] = otp_hash
                     session['login_otp_expires'] = time.time() + 300
                     
+                    success = False
                     try:
                         subject = "Smart Banking Login Security Code"
                         plain_text = f"Dear {user['FIRSTNAME']} {user['LASTNAME']},\n\nA login attempt was made from an unrecognized browser/device.\n\nYour verification code is: {otp}\n\nIf this was not you, please secure your account."
                         html_body = build_html_email(f"<p>Dear {user['FIRSTNAME']} {user['LASTNAME']},</p><p>A login attempt was made from an unrecognized browser/device.</p><p>Your verification code is:</p><p style='font-size: 1.5rem; font-weight: bold; color: #9b5de5;'>{otp}</p><p>If this was not you, please secure your account immediately.</p>")
-                        dispatch_email_async(user['EMAIL'], subject, plain_text, html_body)
+                        success = send_email(user['EMAIL'], subject, plain_text, html_body)
                     except Exception as e_mail:
                         print(f"[ERROR] Failed to send login OTP: {e_mail}", flush=True)
+                        
+                    if not success:
+                        session.pop('login_pending_user_id', None)
+                        session.pop('login_pending_username', None)
+                        session.pop('login_otp_hash', None)
+                        session.pop('login_otp_expires', None)
+                        conn.close()
+                        return jsonify({"status": "error", "message": "Unable to deliver the OTP email. Please try again."}), 500
                         
                     parts = user['EMAIL'].split('@')
                     masked_email = parts[0][0] + "*" * (len(parts[0]) - 1) + "@" + parts[1]
@@ -2721,11 +2748,13 @@ def transfer_initiate():
 
         t_mail = time.time()
         print(f"[DEBUG] [Step 9: SMTP email send started] To: {sender_email}", flush=True)
+        success = False
         try:
-            send_otp_email(sender_email, otp, amount, receiver)
-            print(f"[DEBUG] [Step 10: SMTP email send completed] took {time.time() - t_mail:.4f}s", flush=True)
+            success = send_otp_email(sender_email, otp, amount, receiver)
         except Exception as mail_err:
             print(f"[DEBUG] [SMTP email send failed] Error: {mail_err}", flush=True)
+            
+        if not success:
             # Delete database records to prevent bypass
             t_rollback = time.time()
             conn = get_db_connection()
@@ -2737,7 +2766,9 @@ def transfer_initiate():
             print(f"[DEBUG] [Database rollback cleanup completed] took {time.time() - t_rollback:.4f}s", flush=True)
             print("END /api/transfer/initiate", flush=True)
             print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
-            return jsonify({"status": "error", "message": "Failed to send verification email. Please verify SMTP settings."}), 500
+            return jsonify({"status": "error", "message": "Unable to deliver the OTP email. Please try again."}), 500
+
+        print(f"[DEBUG] [Step 10: SMTP email send completed] took {time.time() - t_mail:.4f}s", flush=True)
 
         parts = sender_email.split('@')
         name = parts[0]
@@ -2950,13 +2981,19 @@ def otp_resend():
         cursor.execute("SELECT amount, receiver FROM pending_transactions WHERE token = %s", (token,))
         pending_tx = cursor.fetchone()
         
+        success = False
+        try:
+            success = send_otp_email(email, otp, pending_tx['amount'], pending_tx['receiver'])
+        except Exception as mail_err:
+            print(f"[DEBUG] [SMTP email send failed] Error: {mail_err}", flush=True)
+            
+        if not success:
+            conn.rollback()
+            conn.close()
+            return jsonify({"status": "error", "message": "Unable to deliver the OTP email. Please try again."}), 500
+            
         conn.commit()
         conn.close()
-        
-        try:
-            send_otp_email(email, otp, pending_tx['amount'], pending_tx['receiver'])
-        except Exception as mail_err:
-            return jsonify({"status": "error", "message": "Failed to send verification email. Please verify SMTP settings."}), 500
             
         return jsonify({
             "status": "success",
@@ -4021,9 +4058,25 @@ def add_money_initiate():
             conn.close()
             
             # Send OTP email
-            send_otp_email(email, otp, amount, 'Smart Wallet')
+            success = False
+            try:
+                success = send_otp_email(email, otp, amount, 'Smart Wallet')
+            except Exception as mail_err:
+                print(f"[DEBUG] [SMTP email send failed] Error: {mail_err}", flush=True)
+                
+            if not success:
+                t_rollback = time.time()
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = %s", (ref_id,))
+                cursor.execute("DELETE FROM pending_transactions WHERE token = %s", (ref_id,))
+                cursor.execute("DELETE FROM deposits WHERE reference_id = %s", (ref_id,))
+                conn.commit()
+                conn.close()
+                print(f"[DEBUG] [Database rollback cleanup completed] took {time.time() - t_rollback:.4f}s", flush=True)
+                return jsonify({"status": "error", "message": "Unable to deliver the OTP email. Please try again."}), 500
+                
             session['mfa_pending_token'] = ref_id
-            
             return jsonify({
                 "status": "verification_required",
                 "reference_id": ref_id,

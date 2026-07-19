@@ -26,7 +26,7 @@ class BankAppTestCase(unittest.TestCase):
         
         def mock_send(email, otp, amount, receiver):
             self.captured_otps.append(otp)
-            return True
+            return app_module.send_email(email, 'Smart Banking Security Verification Code', f'Your code is: {otp}')
         app_module.send_otp_email = mock_send
         
         # Reset testing database file before each test
@@ -1117,7 +1117,7 @@ class BankAppTestCase(unittest.TestCase):
         }), content_type='application/json')
         self.assertEqual(res_init_fail.status_code, 500)
         data_fail = json.loads(res_init_fail.data)
-        self.assertIn('Failed to send verification email', data_fail['message'])
+        self.assertIn('Unable to deliver the OTP email. Please try again.', data_fail['message'])
         
         # Verify challenge was deleted (only 1 challenge remains from the first successful transaction)
         with app.app_context():
@@ -2540,6 +2540,198 @@ class BankAppTestCase(unittest.TestCase):
             "amount": "\u20b92,00,001", "method": "Debit Card", "gateway": "Visa"
         })
         self.assertEqual(res_format_exceed.status_code, 400)
+
+    @patch('app.send_email')
+    def test_resend_api_success(self, mock_send):
+        mock_send.return_value = True
+        
+        self.register_user('res_success', 'res_s@test.com', 'pwd123', 'pwd123', '999')
+        self.login_user('res_success', 'pwd123')
+        
+        res = self.client.post('/api/transfer/initiate', json={
+            "receiver": "ATM_01",
+            "amount": 25000,
+            "type": "CASH_OUT",
+            "remarks": "MFA trigger"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        token = data['transaction_token']
+        
+        # Force set cooldown past
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE transaction_otp_challenges SET last_sent_at = datetime('now', '-2 minutes') WHERE transaction_token = %s", (token,))
+        conn.commit()
+        conn.close()
+
+        res_resend = self.client.post('/api/otp/resend', json={
+            "transaction_token": token
+        })
+        self.assertEqual(res_resend.status_code, 200)
+        data_resend = json.loads(res_resend.data)
+        self.assertEqual(data_resend['status'], 'success')
+        self.assertIn("A new verification code has been sent", data_resend['message'])
+
+    @patch('app.send_email')
+    def test_resend_api_failure_restores_database(self, mock_send):
+        mock_send.return_value = True
+        
+        self.register_user('res_fail', 'res_f@test.com', 'pwd123', 'pwd123', '999')
+        self.login_user('res_fail', 'pwd123')
+        
+        res = self.client.post('/api/transfer/initiate', json={
+            "receiver": "ATM_01",
+            "amount": 25000,
+            "type": "CASH_OUT",
+            "remarks": "MFA trigger"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        token = data['transaction_token']
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT resend_count, otp_hash FROM transaction_otp_challenges WHERE transaction_token = %s", (token,))
+        row = cursor.fetchone()
+        orig_hash = row['otp_hash']
+        self.assertEqual(row['resend_count'], 0)
+        conn.close()
+        
+        mock_send.return_value = False
+        
+        # Force set cooldown past
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE transaction_otp_challenges SET last_sent_at = datetime('now', '-2 minutes') WHERE transaction_token = %s", (token,))
+        conn.commit()
+        conn.close()
+
+        res_resend = self.client.post('/api/otp/resend', json={
+            "transaction_token": token
+        })
+        self.assertEqual(res_resend.status_code, 500)
+        data_resend = json.loads(res_resend.data)
+        self.assertEqual(data_resend['status'], 'error')
+        self.assertEqual(data_resend['message'], "Unable to deliver the OTP email. Please try again.")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT resend_count, otp_hash FROM transaction_otp_challenges WHERE transaction_token = %s", (token,))
+        row = cursor.fetchone()
+        self.assertEqual(row['resend_count'], 0)
+        self.assertEqual(row['otp_hash'], orig_hash)
+        conn.close()
+
+    @patch('app.send_email')
+    def test_transfer_otp_delivery_failure(self, mock_send):
+        mock_send.return_value = False
+        
+        self.register_user('tx_fail_delivery', 'tx_fd@test.com', 'pwd123', 'pwd123', '999')
+        self.login_user('tx_fail_delivery', 'pwd123')
+        
+        res = self.client.post('/api/transfer/initiate', json={
+            "receiver": "ATM_01",
+            "amount": 25000,
+            "type": "CASH_OUT",
+            "remarks": "MFA trigger"
+        })
+        self.assertEqual(res.status_code, 500)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'error')
+        self.assertEqual(data['message'], "Unable to deliver the OTP email. Please try again.")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM pending_transactions")
+        self.assertEqual(cursor.fetchone()[0], 0)
+        cursor.execute("SELECT COUNT(*) FROM transaction_otp_challenges")
+        self.assertEqual(cursor.fetchone()[0], 0)
+        conn.close()
+
+    @patch('app.send_email')
+    def test_add_money_otp_delivery_failure(self, mock_send):
+        mock_send.return_value = False
+        
+        self.register_user('am_fail_delivery', 'am_fd@test.com', 'pwd123', 'pwd123', '999')
+        self.login_user('am_fail_delivery', 'pwd123')
+        
+        res = self.client.post('/api/add-money/initiate', json={
+            "amount": 25000, "method": "UPI", "gateway": "Google Pay"
+        })
+        self.assertEqual(res.status_code, 500)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'error')
+        self.assertEqual(data['message'], "Unable to deliver the OTP email. Please try again.")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM deposits")
+        self.assertEqual(cursor.fetchone()[0], 0)
+        cursor.execute("SELECT COUNT(*) FROM pending_transactions")
+        self.assertEqual(cursor.fetchone()[0], 0)
+        cursor.execute("SELECT COUNT(*) FROM transaction_otp_challenges")
+        self.assertEqual(cursor.fetchone()[0], 0)
+        conn.close()
+
+    @patch('app.send_email')
+    def test_login_mfa_otp_delivery_failure(self, mock_send):
+        self.register_user('login_fail_user', 'login_f@test.com', 'pwd123', 'pwd123', '999')
+        
+        # First login trusts fingerprint_1
+        self.client.post('/api/login', json={
+            "username": "login_fail_user",
+            "password": "pwd123"
+        }, headers={'X-Device-Fingerprint': 'fingerprint_1'})
+        self.logout_user()
+        
+        # Second login from fingerprint_2 triggers OTP, mock email fail
+        mock_send.return_value = False
+        
+        res = self.client.post('/api/login', json={
+            "username": "login_fail_user",
+            "password": "pwd123"
+        }, headers={'X-Device-Fingerprint': 'fingerprint_2'})
+        
+        self.assertEqual(res.status_code, 500)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'error')
+        self.assertEqual(data['message'], "Unable to deliver the OTP email. Please try again.")
+        
+        with self.client.session_transaction() as sess:
+            self.assertNotIn('login_otp_hash', sess)
+            self.assertNotIn('login_pending_user_id', sess)
+
+    def test_invalid_recipient_email(self):
+        import app as app_module
+        self.assertFalse(app_module.send_email("invalid-email", "test", "test"))
+        self.assertFalse(app_module.send_email("@domain.com", "test", "test"))
+        self.assertFalse(app_module.send_email("name@", "test", "test"))
+
+    def test_missing_api_key_in_production(self):
+        import app as app_module
+        orig_key = os.environ.get('RESEND_API_KEY')
+        orig_render = os.environ.get('RENDER')
+        orig_sim = os.environ.get('TEST_PROD_SIMULATION')
+        
+        try:
+            if 'RESEND_API_KEY' in os.environ:
+                del os.environ['RESEND_API_KEY']
+            os.environ['RENDER'] = 'true'
+            os.environ['TEST_PROD_SIMULATION'] = '1'
+            
+            self.assertFalse(app_module.send_email("test@example.com", "test", "test"))
+        finally:
+            if orig_sim is not None:
+                os.environ['TEST_PROD_SIMULATION'] = orig_sim
+            else:
+                if 'TEST_PROD_SIMULATION' in os.environ:
+                    del os.environ['TEST_PROD_SIMULATION']
+            if orig_key is not None:
+                os.environ['RESEND_API_KEY'] = orig_key
+            if orig_render is not None:
+                os.environ['RENDER'] = orig_render
 
 if __name__ == '__main__':
     unittest.main()
