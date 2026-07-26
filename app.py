@@ -185,7 +185,8 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
     url = "https://api.resend.com/emails"
     headers = {
         "Authorization": f"Bearer {resend_api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "Smart-Banking-Fraud-Detection/1.0"
     }
     payload = {
         "from": resend_from,

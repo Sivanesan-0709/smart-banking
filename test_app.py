@@ -2968,3 +2968,26 @@ if __name__ == '__main__':
         self.client.get('/api/logout')
         res_unauth_del = self.client.post('/api/biometric/delete')
         self.assertEqual(res_unauth_del.status_code, 401)
+
+
+    @patch('urllib.request.urlopen')
+    @patch.dict('os.environ', {'RESEND_API_KEY': 're_test_key_12345', 'RESEND_FROM_EMAIL': 'onboarding@resend.dev'})
+    def test_send_email_user_agent_header(self, mock_urlopen):
+        import io
+        import urllib.request
+        from app import send_email
+        
+        mock_response = io.BytesIO(b'{"id": "test_resend_msg_id"}')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        success = send_email('test_recipient@example.com', 'Test Subject', 'Test Body')
+        self.assertTrue(success)
+
+        self.assertTrue(mock_urlopen.called)
+        args, kwargs = mock_urlopen.call_args
+        req = args[0]
+        self.assertIsInstance(req, urllib.request.Request)
+        
+        user_agent_val = req.headers.get('User-agent') or req.headers.get('User-Agent')
+        self.assertIsNotNone(user_agent_val)
+        self.assertEqual(user_agent_val, "Smart-Banking-Fraud-Detection/1.0")
