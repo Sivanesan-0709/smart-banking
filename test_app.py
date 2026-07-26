@@ -53,7 +53,7 @@ class BankAppTestCase(unittest.TestCase):
             # Insert a predefined admin user
             cursor.execute('''
             INSERT INTO NEWBANK (USERNAME, FIRSTNAME, LASTNAME, EMAIL, PASSWORD, CONFIRM, PHONE, SEX, ADDRESS, BAL)
-            VALUES ('admin', 'System', 'Admin', 'admin@mtbl.com', 'adminpass', 'adminpass', '08000000000', 'Other', 'System Core', 100000.0)
+            VALUES ('admin', 'System', 'Admin', 'admin@smartbank.com', 'adminpass', 'adminpass', '08000000000', 'Other', 'System Core', 100000.0)
             ''')
             conn.commit()
             conn.close()
@@ -88,6 +88,63 @@ class BankAppTestCase(unittest.TestCase):
     def logout_user(self):
         return self.client.post('/api/logout')
 
+
+    def test_registration_validation_rules(self):
+        # A. Valid registration -> PASS
+        res_valid = self.register_user('reg_valid', 'reg_valid@example.com', 'secret123', 'secret123', '08123456789')
+        self.assertEqual(res_valid.status_code, 200)
+        data_valid = json.loads(res_valid.data)
+        self.assertEqual(data_valid['status'], 'success')
+
+        # B. Invalid email format -> REJECTED (400)
+        res_bad_email = self.register_user('reg_bad_email', 'invalid-email-format', 'secret123', 'secret123', '08123456789')
+        self.assertEqual(res_bad_email.status_code, 400)
+        data_bad_email = json.loads(res_bad_email.data)
+        self.assertEqual(data_bad_email['status'], 'error')
+        self.assertIn("Invalid email address format", data_bad_email['message'])
+
+        # C. Duplicate username -> REJECTED (400)
+        res_dup_user = self.register_user('reg_valid', 'other_email@example.com', 'secret123', 'secret123', '08123456789')
+        self.assertEqual(res_dup_user.status_code, 400)
+        data_dup_user = json.loads(res_dup_user.data)
+        self.assertEqual(data_dup_user['status'], 'error')
+        self.assertIn("Username already exists", data_dup_user['message'])
+
+        # D. Duplicate email -> REJECTED (409)
+        res_dup_email = self.register_user('other_user', 'reg_valid@example.com', 'secret123', 'secret123', '08123456789')
+        self.assertEqual(res_dup_email.status_code, 409)
+        data_dup_email = json.loads(res_dup_email.data)
+        self.assertEqual(data_dup_email['status'], 'error')
+        self.assertIn("already registered", data_dup_email['message'])
+
+        # E. Duplicate email with different capitalization -> REJECTED (409)
+        res_dup_email_caps = self.register_user('other_user2', 'REG_VALID@EXAMPLE.COM', 'secret123', 'secret123', '08123456789')
+        self.assertEqual(res_dup_email_caps.status_code, 409)
+        data_dup_email_caps = json.loads(res_dup_email_caps.data)
+        self.assertEqual(data_dup_email_caps['status'], 'error')
+        self.assertIn("already registered", data_dup_email_caps['message'])
+
+        # F. Password under 6 characters -> REJECTED (400)
+        res_short_pw = self.register_user('short_pw_user', 'short_pw@example.com', '12345', '12345', '08123456789')
+        self.assertEqual(res_short_pw.status_code, 400)
+        data_short_pw = json.loads(res_short_pw.data)
+        self.assertEqual(data_short_pw['status'], 'error')
+        self.assertIn("at least 6 characters", data_short_pw['message'])
+
+        # G. Password confirmation mismatch -> REJECTED (400)
+        res_mismatch = self.register_user('mismatch_user', 'mismatch@example.com', 'secret123', 'different123', '08123456789')
+        self.assertEqual(res_mismatch.status_code, 400)
+        data_mismatch = json.loads(res_mismatch.data)
+        self.assertEqual(data_mismatch['status'], 'error')
+        self.assertIn("do not match", data_mismatch['message'])
+
+        # H. Existing user login still works -> PASS
+        res_login = self.login_user('reg_valid', 'secret123')
+        self.assertEqual(res_login.status_code, 200)
+        data_login = json.loads(res_login.data)
+        self.assertEqual(data_login['status'], 'success')
+        self.assertEqual(data_login['user']['username'], 'reg_valid')
+
     def test_registration_and_login(self):
         # 1. Test registration
         res = self.register_user('user1', 'user1@example.com', 'secret123', 'secret123', '08123456789')
@@ -96,7 +153,7 @@ class BankAppTestCase(unittest.TestCase):
         self.assertEqual(data['status'], 'success')
 
         # Test duplicate registration block
-        res_dup = self.register_user('user1', 'dup@example.com', 'pwd', 'pwd', '08123456789')
+        res_dup = self.register_user('user1', 'dup@example.com', 'secret123', 'secret123', '08123456789')
         self.assertEqual(res_dup.status_code, 400)
         
         # 2. Test login
@@ -331,8 +388,8 @@ class BankAppTestCase(unittest.TestCase):
 
     def test_admin_permissions(self):
         # Register standard user
-        self.register_user('charlie', 'charlie@test.com', 'pass', 'pass', '08333333333')
-        self.login_user('charlie', 'pass')
+        self.register_user('charlie', 'charlie@test.com', 'pass123', 'pass123', '08333333333')
+        self.login_user('charlie', 'pass123')
         
         # Standard user forbidden from admin endpoints
         res_stats = self.client.get('/api/admin/stats')
@@ -1325,10 +1382,10 @@ class BankAppTestCase(unittest.TestCase):
         # 1. Register and login
         self.client.post('/api/register', json={
             "username": "deposit_low", "firstname": "Dep", "lastname": "Low",
-            "email": "dep_low@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "dep_low@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "deposit_low", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "deposit_low", "password": "pwd123"})
         
         # 2. Initiate deposit (Low Risk, < 20,000)
         res = self.client.post('/api/add-money/initiate', json={
@@ -1355,10 +1412,10 @@ class BankAppTestCase(unittest.TestCase):
         # 1. Register and login
         self.client.post('/api/register', json={
             "username": "deposit_med", "firstname": "Dep", "lastname": "Med",
-            "email": "dep_med@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "dep_med@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "deposit_med", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "deposit_med", "password": "pwd123"})
         
         # 2. Initiate deposit (Medium Risk, > 20,000)
         res = self.client.post('/api/add-money/initiate', json={
@@ -1386,10 +1443,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_add_money_limits(self):
         self.client.post('/api/register', json={
             "username": "deposit_limits", "firstname": "Dep", "lastname": "Limits",
-            "email": "dep_lim@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "dep_lim@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "deposit_limits", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "deposit_limits", "password": "pwd123"})
         
         # Min limit
         res_min = self.client.post('/api/add-money/initiate', json={
@@ -1406,10 +1463,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_add_money_deduplication(self):
         self.client.post('/api/register', json={
             "username": "deposit_dedup", "firstname": "Dep", "lastname": "Dedup",
-            "email": "dep_dedup@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "dep_dedup@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "deposit_dedup", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "deposit_dedup", "password": "pwd123"})
         
         # First request
         res1 = self.client.post('/api/add-money/initiate', json={
@@ -1431,10 +1488,10 @@ class BankAppTestCase(unittest.TestCase):
         # Register and login
         self.client.post('/api/register', json={
             "username": "qr_sender", "firstname": "QR", "lastname": "Sender",
-            "email": "qr_send@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_send@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd123"})
         
         res = self.client.get('/api/qr/token')
         self.assertEqual(res.status_code, 200)
@@ -1446,24 +1503,24 @@ class BankAppTestCase(unittest.TestCase):
         # Register sender
         self.client.post('/api/register', json={
             "username": "qr_sender", "firstname": "QR", "lastname": "Sender",
-            "email": "qr_send@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_send@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         # Register and login recipient
         self.client.post('/api/register', json={
             "username": "qr_rec", "firstname": "QR", "lastname": "Rec",
-            "email": "qr_rec@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_rec@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         
         # Generate token
-        self.client.post('/api/login', json={"username": "qr_rec", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_rec", "password": "pwd123"})
         res_tok = self.client.get('/api/qr/token')
         data_tok = json.loads(res_tok.data)
         token = data_tok['qr_token']
         
         # Login sender
-        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd123"})
         
         # Scan token
         res_scan = self.client.post('/api/qr/scan', json={"qr_token": token})
@@ -1477,10 +1534,10 @@ class BankAppTestCase(unittest.TestCase):
         # Register sender
         self.client.post('/api/register', json={
             "username": "qr_sender", "firstname": "QR", "lastname": "Sender",
-            "email": "qr_send@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_send@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_sender", "password": "pwd123"})
         res = self.client.post('/api/qr/scan', json={"qr_token": "invalid-token-value"})
         self.assertEqual(res.status_code, 400)
         data = json.loads(res.data)
@@ -1490,22 +1547,22 @@ class BankAppTestCase(unittest.TestCase):
         # Register sender and receiver
         self.client.post('/api/register', json={
             "username": "qr_send2", "firstname": "QR", "lastname": "Send2",
-            "email": "qr_s2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_s2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "qr_rec2", "firstname": "QR", "lastname": "Rec2",
-            "email": "qr_r2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_r2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         
         # Generate token for receiver
-        self.client.post('/api/login', json={"username": "qr_rec2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_rec2", "password": "pwd123"})
         res_tok = self.client.get('/api/qr/token')
         token = json.loads(res_tok.data)['qr_token']
         
         # Login sender
-        self.client.post('/api/login', json={"username": "qr_send2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_send2", "password": "pwd123"})
         
         # Initiate payment
         res_pay = self.client.post('/api/transfer/initiate', json={
@@ -1529,15 +1586,15 @@ class BankAppTestCase(unittest.TestCase):
         # Register sender and receiver
         self.client.post('/api/register', json={
             "username": "qr_send2", "firstname": "QR", "lastname": "Send2",
-            "email": "qr_s2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_s2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "qr_rec2", "firstname": "QR", "lastname": "Rec2",
-            "email": "qr_r2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "qr_r2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "qr_send2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "qr_send2", "password": "pwd123"})
         # Try paying with incorrect token
         res_pay = self.client.post('/api/transfer/initiate', json={
             "receiver": "qr_rec2",
@@ -1555,16 +1612,16 @@ class BankAppTestCase(unittest.TestCase):
         # Register recipient
         self.client.post('/api/register', json={
             "username": "b_rec1", "firstname": "B", "lastname": "Rec1",
-            "email": "b1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "b1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         # Register and login user
         self.client.post('/api/register', json={
             "username": "b_user1", "firstname": "B", "lastname": "User1",
-            "email": "bu1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "bu1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "b_user1", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "b_user1", "password": "pwd123"})
         
         res = self.client.post('/api/beneficiaries', json={"username": "b_rec1", "nickname": "My Friend"})
         self.assertEqual(res.status_code, 200)
@@ -1574,15 +1631,15 @@ class BankAppTestCase(unittest.TestCase):
     def test_add_beneficiary_duplicate(self):
         self.client.post('/api/register', json={
             "username": "b_rec2", "firstname": "B", "lastname": "Rec2",
-            "email": "b2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "b2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "b_user2", "firstname": "B", "lastname": "User2",
-            "email": "bu2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "bu2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "b_user2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "b_user2", "password": "pwd123"})
         
         # Add once
         self.client.post('/api/beneficiaries', json={"username": "b_rec2", "nickname": "Friend"})
@@ -1595,25 +1652,25 @@ class BankAppTestCase(unittest.TestCase):
     def test_add_beneficiary_self(self):
         self.client.post('/api/register', json={
             "username": "b_user3", "firstname": "B", "lastname": "User3",
-            "email": "bu3@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "bu3@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "b_user3", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "b_user3", "password": "pwd123"})
         res = self.client.post('/api/beneficiaries', json={"username": "b_user3"})
         self.assertEqual(res.status_code, 400)
 
     def test_get_beneficiaries(self):
         self.client.post('/api/register', json={
             "username": "b_rec4", "firstname": "B", "lastname": "Rec4",
-            "email": "b4@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "b4@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "b_user4", "firstname": "B", "lastname": "User4",
-            "email": "bu4@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "bu4@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "b_user4", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "b_user4", "password": "pwd123"})
         
         # Add beneficiary
         self.client.post('/api/beneficiaries', json={"username": "b_rec4", "nickname": "Bob"})
@@ -1628,15 +1685,15 @@ class BankAppTestCase(unittest.TestCase):
     def test_favorite_beneficiary(self):
         self.client.post('/api/register', json={
             "username": "b_rec5", "firstname": "B", "lastname": "Rec5",
-            "email": "b5@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "b5@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "b_user5", "firstname": "B", "lastname": "User5",
-            "email": "bu5@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "bu5@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "b_user5", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "b_user5", "password": "pwd123"})
         
         self.client.post('/api/beneficiaries', json={"username": "b_rec5", "nickname": "Alice"})
         
@@ -1654,15 +1711,15 @@ class BankAppTestCase(unittest.TestCase):
         # Register users
         self.client.post('/api/register', json={
             "username": "b_rec6", "firstname": "B", "lastname": "Rec6",
-            "email": "b6@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "b6@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "b_user6", "firstname": "B", "lastname": "User6",
-            "email": "bu6@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "bu6@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "b_user6", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "b_user6", "password": "pwd123"})
         
         # Add beneficiary
         self.client.post('/api/beneficiaries', json={"username": "b_rec6", "nickname": "Charlie"})
@@ -1686,10 +1743,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_session_logging_on_login(self):
         self.client.post('/api/register', json={
             "username": "s_user1", "firstname": "S", "lastname": "User1",
-            "email": "s1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "s1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "s_user1", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "s_user1", "password": "pwd123"})
         
         # Check active session list
         res = self.client.get('/api/security/sessions')
@@ -1702,10 +1759,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_session_revocation(self):
         self.client.post('/api/register', json={
             "username": "s_user2", "firstname": "S", "lastname": "User2",
-            "email": "s2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "s2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "s_user2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "s_user2", "password": "pwd123"})
         
         res = self.client.get('/api/security/sessions')
         sessions = json.loads(res.data)['sessions']
@@ -1722,15 +1779,15 @@ class BankAppTestCase(unittest.TestCase):
     def test_revoke_others(self):
         self.client.post('/api/register', json={
             "username": "s_user3", "firstname": "S", "lastname": "User3",
-            "email": "s3@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "s3@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         # Simulate active session 1
-        self.client.post('/api/login', json={"username": "s_user3", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "s_user3", "password": "pwd123"})
         
         # Simulate active session 2 (by logging in again, which creates a new session_id)
         # Note: self.client preserves cookies, but posting login clears previous and starts new.
-        self.client.post('/api/login', json={"username": "s_user3", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "s_user3", "password": "pwd123"})
         
         # There should be 2 login history records in DB for this user
         res = self.client.get('/api/security/sessions')
@@ -1753,10 +1810,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_device_trust_toggle(self):
         self.client.post('/api/register', json={
             "username": "s_user4", "firstname": "S", "lastname": "User4",
-            "email": "s4@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "s4@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "s_user4", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "s_user4", "password": "pwd123"})
         
         res = self.client.post('/api/security/devices/trust', json={
             "device_fingerprint": "default_fingerprint",
@@ -1773,15 +1830,15 @@ class BankAppTestCase(unittest.TestCase):
     def test_xai_enrichment_on_transfer(self):
         self.client.post('/api/register', json={
             "username": "x_user1", "firstname": "X", "lastname": "User1",
-            "email": "x1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "x1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "x_rec1", "firstname": "X", "lastname": "Rec1",
-            "email": "xr1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "xr1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "x_user1", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "x_user1", "password": "pwd123"})
         
         # Trigger medium risk to get SMS OTP challenge with XAI trace
         self.client.post('/api/transfer/initiate', json={
@@ -1806,15 +1863,15 @@ class BankAppTestCase(unittest.TestCase):
     def test_xai_explain_api_route(self):
         self.client.post('/api/register', json={
             "username": "x_user2", "firstname": "X", "lastname": "User2",
-            "email": "x2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "x2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         self.client.post('/api/register', json={
             "username": "x_rec2", "firstname": "X", "lastname": "Rec2",
-            "email": "xr2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "xr2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "x_user2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "x_user2", "password": "pwd123"})
         
         # Initiate a low-risk transfer
         self.client.post('/api/transfer/initiate', json={
@@ -1883,10 +1940,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_notification_on_login(self):
         self.client.post('/api/register', json={
             "username": "n_user1", "firstname": "N", "lastname": "User1",
-            "email": "n1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "n1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "n_user1", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "n_user1", "password": "pwd123"})
         
         res = self.client.get('/api/notifications')
         self.assertEqual(res.status_code, 200)
@@ -1898,10 +1955,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_mark_all_read(self):
         self.client.post('/api/register', json={
             "username": "n_user2", "firstname": "N", "lastname": "User2",
-            "email": "n2@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "n2@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "n_user2", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "n_user2", "password": "pwd123"})
         
         # Mark all read
         res_read = self.client.post('/api/notifications/read')
@@ -1916,10 +1973,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_mark_single_read(self):
         self.client.post('/api/register', json={
             "username": "n_user3", "firstname": "N", "lastname": "User3",
-            "email": "n3@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "n3@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "n_user3", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "n_user3", "password": "pwd123"})
         
         # Get notifications list to find ID
         res = self.client.get('/api/notifications')
@@ -1936,10 +1993,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_delete_notification(self):
         self.client.post('/api/register', json={
             "username": "n_user4", "firstname": "N", "lastname": "User4",
-            "email": "n4@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "n4@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "n_user4", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "n_user4", "password": "pwd123"})
         
         res = self.client.get('/api/notifications')
         nid = json.loads(res.data)['notifications'][0]['id']
@@ -1957,10 +2014,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_dashboard_metrics_route(self):
         self.client.post('/api/register', json={
             "username": "m_user1", "firstname": "M", "lastname": "User1",
-            "email": "m1@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "m1@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "m_user1", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "m_user1", "password": "pwd123"})
         
         res = self.client.get('/api/dashboard/metrics')
         self.assertEqual(res.status_code, 200)
@@ -1977,18 +2034,18 @@ class BankAppTestCase(unittest.TestCase):
         # Register sender
         self.client.post('/api/register', json={
             "username": "s_user", "firstname": "S", "lastname": "User",
-            "email": "s@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "s@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         # Register receiver
         self.client.post('/api/register', json={
             "username": "r_user", "firstname": "R", "lastname": "User",
-            "email": "r@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "r@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
         
         # Login sender
-        self.client.post('/api/login', json={"username": "s_user", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "s_user", "password": "pwd123"})
         
         # Transfer
         self.client.post('/api/transfer/initiate', json={
@@ -2003,7 +2060,7 @@ class BankAppTestCase(unittest.TestCase):
         self.assertTrue(any("Transferred" in n['title'] for n in data_s['notifications']))
         
         # Login receiver
-        self.client.post('/api/login', json={"username": "r_user", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "r_user", "password": "pwd123"})
         
         # Check receiver notifications
         res_r = self.client.get('/api/notifications')
@@ -2013,10 +2070,10 @@ class BankAppTestCase(unittest.TestCase):
     def test_notification_on_deposit(self):
         self.client.post('/api/register', json={
             "username": "d_user", "firstname": "D", "lastname": "User",
-            "email": "d@test.com", "password": "pwd", "confirm": "pwd",
+            "email": "d@test.com", "password": "pwd123", "confirm": "pwd123",
             "phone": "123", "sex": "M", "address": "Addr"
         })
-        self.client.post('/api/login', json={"username": "d_user", "password": "pwd"})
+        self.client.post('/api/login', json={"username": "d_user", "password": "pwd123"})
         
         # Initiate deposit
         self.client.post('/api/add-money/initiate', json={
@@ -2088,8 +2145,8 @@ class BankAppTestCase(unittest.TestCase):
         app_module.send_email = fail_send
         
         try:
-            self.register_user("deposit_fail_mail", "dep@fail.com", "pwd", "pwd", "123")
-            self.login_user("deposit_fail_mail", "pwd")
+            self.register_user("deposit_fail_mail", "dep@fail.com", "pwd123", "pwd123", "123")
+            self.login_user("deposit_fail_mail", "pwd123")
             
             res = self.client.post('/api/add-money/initiate', json={
                 "amount": 2000,
@@ -2112,8 +2169,8 @@ class BankAppTestCase(unittest.TestCase):
         app_module.send_email = fail_send
         
         try:
-            self.register_user("withdraw_fail_mail", "w@fail.com", "pwd", "pwd", "123")
-            self.login_user("withdraw_fail_mail", "pwd")
+            self.register_user("withdraw_fail_mail", "w@fail.com", "pwd123", "pwd123", "123")
+            self.login_user("withdraw_fail_mail", "pwd123")
             
             res = self.client.post('/api/transfer/initiate', json={
                 "receiver": "ATM_01",
@@ -2136,9 +2193,9 @@ class BankAppTestCase(unittest.TestCase):
         app_module.send_email = fail_send
         
         try:
-            self.register_user("tx_fail_sender", "s_tx@fail.com", "pwd", "pwd", "123")
-            self.register_user("tx_fail_rec", "r_tx@fail.com", "pwd", "pwd", "456")
-            self.login_user("tx_fail_sender", "pwd")
+            self.register_user("tx_fail_sender", "s_tx@fail.com", "pwd123", "pwd123", "123")
+            self.register_user("tx_fail_rec", "r_tx@fail.com", "pwd123", "pwd123", "456")
+            self.login_user("tx_fail_sender", "pwd123")
             
             res = self.client.post('/api/transfer/initiate', json={
                 "receiver": "tx_fail_rec",
@@ -2152,8 +2209,8 @@ class BankAppTestCase(unittest.TestCase):
             app_module.send_email = original_send_email
 
     def test_otp_emails_continue_working_unchanged(self):
-        self.register_user("otp_user", "otp@test.com", "pwd", "pwd", "123")
-        self.login_user("otp_user", "pwd")
+        self.register_user("otp_user", "otp@test.com", "pwd123", "pwd123", "123")
+        self.login_user("otp_user", "pwd123")
         
         res = self.client.post('/api/add-money/initiate', json={
             "amount": 25000,
@@ -2182,7 +2239,7 @@ class BankAppTestCase(unittest.TestCase):
         app_module.send_email = capture_recipient
         
         try:
-            self.register_user("rec_check", "correct_rec@test.com", "pwd", "pwd", "123")
+            self.register_user("rec_check", "correct_rec@test.com", "pwd123", "pwd123", "123")
             self.assertEqual(recipient_captured[-1], "correct_rec@test.com")
             
             self.login_user("rec_check", "pwd")
@@ -2744,3 +2801,170 @@ if __name__ == '__main__':
 
 
 
+
+
+    def test_smart_wallet_comprehensive_suite(self):
+        # 1. Register test user
+        self.register_user('wallet_user', 'wallet_u@test.com', 'pwd123', 'pwd123', '08199998888', bal=1000.0)
+        self.login_user('wallet_user', 'pwd123')
+
+        # Point 1: Get wallet balance
+        res_prof = self.client.get('/api/profile')
+        self.assertEqual(res_prof.status_code, 200)
+        data_prof = json.loads(res_prof.data)
+        initial_bal = data_prof['user']['balance']
+        self.assertEqual(initial_bal, 1000.0)
+
+        # Point 5, 6, 7: Reject invalid inputs (0, negative, format, out-of-range)
+        for invalid_amt in [0, -500, 50, 250000, "abc"]:
+            res_inv = self.client.post('/api/add-money/initiate', json={
+                "amount": invalid_amt, "method": "UPI", "gateway": "Google Pay", "remarks": "Test invalid"
+            })
+            self.assertEqual(res_inv.status_code, 400)
+
+        # Verify balance unchanged after invalid inputs
+        res_prof_check = self.client.get('/api/profile')
+        self.assertEqual(json.loads(res_prof_check.data)['user']['balance'], 1000.0)
+
+        # Point 2: Add Rs 100 (Low Risk)
+        res_100 = self.client.post('/api/add-money/initiate', json={
+            "amount": 100.0, "method": "UPI", "gateway": "Google Pay", "remarks": "Topup 100"
+        })
+        self.assertEqual(res_100.status_code, 200)
+        data_100 = json.loads(res_100.data)
+        self.assertEqual(data_100['status'], 'success')
+
+        # Point 3: Add Rs 500 (Low Risk)
+        res_500 = self.client.post('/api/add-money/initiate', json={
+            "amount": 500.0, "method": "UPI", "gateway": "PhonePe", "remarks": "Topup 500"
+        })
+        self.assertEqual(res_500.status_code, 200)
+        data_500 = json.loads(res_500.data)
+        self.assertEqual(data_500['status'], 'success')
+
+        # Point 4: Add Rs 1000 (Low Risk)
+        res_1000 = self.client.post('/api/add-money/initiate', json={
+            "amount": 1000.0, "method": "UPI", "gateway": "Paytm", "remarks": "Topup 1000"
+        })
+        self.assertEqual(res_1000.status_code, 200)
+
+        # Point 8 & 9: Verify database balance (1000 + 100 + 500 + 1000 = 2600.0)
+        res_prof_final = self.client.get('/api/profile')
+        self.assertEqual(json.loads(res_prof_final.data)['user']['balance'], 2600.0)
+
+        # Point 10 & 11: Verify ledger entries & transaction history
+        res_hist = self.client.get('/api/add-money/history')
+        self.assertEqual(res_hist.status_code, 200)
+        data_hist = json.loads(res_hist.data)
+        self.assertEqual(len(data_hist['history']), 3)
+
+        res_txs = self.client.get('/api/transactions')
+        self.assertEqual(res_txs.status_code, 200)
+
+    @patch('app.send_otp_email')
+    def test_smart_wallet_mfa_and_delivery_safety(self, mock_send_otp):
+        mock_send_otp.return_value = True
+
+        self.register_user('wallet_mfa_user', 'wallet_mfa@test.com', 'pwd123', 'pwd123', '08199997777', bal=5000.0)
+        self.login_user('wallet_mfa_user', 'pwd123')
+
+        # Point 12: OTP-required Add Money (Medium Risk) does not credit before verification
+        res_init = self.client.post('/api/add-money/initiate', json={
+            "amount": 25000.0, "method": "Debit Card", "gateway": "Visa", "remarks": "Medium risk deposit"
+        })
+        self.assertEqual(res_init.status_code, 200)
+        data_init = json.loads(res_init.data)
+        self.assertEqual(data_init['status'], 'verification_required')
+        token = data_init['reference_id']
+
+        # Balance before OTP verification remains 5000.0
+        res_prof = self.client.get('/api/profile')
+        self.assertEqual(json.loads(res_prof.data)['user']['balance'], 5000.0)
+
+        # Point 13: Correct OTP completes transaction once
+        otp_code = self.captured_otps[-1]
+        res_ver = self.client.post('/api/transfer/verify', json={
+            "transaction_token": token,
+            "otp": otp_code
+        })
+        self.assertEqual(res_ver.status_code, 200)
+        data_ver = json.loads(res_ver.data)
+        self.assertEqual(data_ver['status'], 'success')
+        self.assertEqual(data_ver['new_balance'], 30000.0)
+
+        # Point 14: Reused OTP cannot credit again
+        res_reuse = self.client.post('/api/transfer/verify', json={
+            "transaction_token": token,
+            "otp": otp_code
+        })
+        self.assertEqual(res_reuse.status_code, 400)
+
+        # Balance remains 30000.0
+        res_prof_check = self.client.get('/api/profile')
+        self.assertEqual(json.loads(res_prof_check.data)['user']['balance'], 30000.0)
+
+        # Point 15: Email delivery failure during required OTP does not credit wallet
+        mock_send_otp.return_value = False
+        res_fail_init = self.client.post('/api/add-money/initiate', json={
+            "amount": 30000.0, "method": "Credit Card", "gateway": "MasterCard", "remarks": "Failed delivery deposit"
+        })
+        self.assertEqual(res_fail_init.status_code, 500)
+        self.assertEqual(json.loads(res_fail_init.data)['message'], "Unable to deliver the OTP email. Please try again.")
+
+        # Balance remains 30000.0
+        res_prof_after_fail = self.client.get('/api/profile')
+        self.assertEqual(json.loads(res_prof_after_fail.data)['user']['balance'], 30000.0)
+
+    @patch('app.send_deposit_email')
+    def test_smart_wallet_post_transaction_email_failure_safety(self, mock_send_deposit):
+        mock_send_deposit.side_effect = Exception("Simulated post-transaction email outage")
+
+        self.register_user('wallet_email_fail', 'w_fail@test.com', 'pwd123', 'pwd123', '08199996666', bal=2000.0)
+        self.login_user('wallet_email_fail', 'pwd123')
+
+        # Point 16: Post-transaction notification failure does not duplicate or reverse a committed credit
+        res_dep = self.client.post('/api/add-money/initiate', json={
+            "amount": 500.0, "method": "UPI", "gateway": "Google Pay", "remarks": "Email failure test"
+        })
+        self.assertEqual(res_dep.status_code, 200)
+
+        # Balance updated to 2500.0 despite post-transaction notification failure
+        res_prof = self.client.get('/api/profile')
+        self.assertEqual(json.loads(res_prof.data)['user']['balance'], 2500.0)
+
+
+    def test_biometric_pipeline_and_delete_authorization(self):
+        # 1. Register test user for biometrics
+        self.register_user('bio_user', 'bio@test.com', 'pwd123', 'pwd123', '08199995555', bal=3000.0)
+        self.login_user('bio_user', 'pwd123')
+
+        # Point 1: Missing image payload in enrollment
+        res_empty = self.client.post('/api/biometric/enroll/sample', json={})
+        self.assertEqual(res_empty.status_code, 400)
+
+        # Point 2: Invalid base64 / malformed image
+        res_bad_b64 = self.client.post('/api/biometric/enroll/sample', json={"image": "not_valid_base64!!!"})
+        self.assertEqual(res_bad_b64.status_code, 400)
+
+        # Point 3: Corrupt image payload
+        import base64
+        corrupt_b64 = base64.b64encode(b"THIS_IS_NOT_AN_IMAGE").decode('utf-8')
+        res_corrupt = self.client.post('/api/biometric/enroll/sample', json={"image": "data:image/jpeg;base64," + corrupt_b64})
+        self.assertEqual(res_corrupt.status_code, 400)
+
+        # Point 7: Check biometric status for non-enrolled user
+        res_status = self.client.get('/api/biometric/status')
+        self.assertEqual(res_status.status_code, 200)
+        data_status = json.loads(res_status.data)
+        self.assertFalse(data_status['is_enrolled'])
+
+        # Point 10: Authorized biometric deletion route testing
+        res_del = self.client.post('/api/biometric/delete')
+        self.assertEqual(res_del.status_code, 200)
+        data_del = json.loads(res_del.data)
+        self.assertEqual(data_del['status'], 'success')
+
+        # Logout user and verify unauthorized deletion is rejected
+        self.client.get('/api/logout')
+        res_unauth_del = self.client.post('/api/biometric/delete')
+        self.assertEqual(res_unauth_del.status_code, 401)

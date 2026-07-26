@@ -503,8 +503,16 @@ function initEnrollWebcam() {
             updatePoseInstructions();
         })
         .catch(err => {
-            document.getElementById('enrollFeedback').innerText = 'Camera Access Error: ' + err.message;
-            showToast('Camera Error', 'Could not open media stream.', 'error');
+            let msg = 'Could not open media stream.';
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                msg = 'Camera permission was denied. Please allow camera access in browser settings.';
+            } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                msg = 'No camera device found on this system.';
+            } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                msg = 'Camera is in use by another application.';
+            }
+            document.getElementById('enrollFeedback').innerText = 'Camera Error: ' + msg;
+            showToast('Camera Error', msg, 'error');
         });
 }
 
@@ -967,8 +975,17 @@ function initMfaWebcam() {
             mfaCheckInterval = setInterval(captureMfaFrame, 1500);
         })
         .catch(err => {
-            document.getElementById('mfaFaceFeedback').innerText = 'Camera Error: ' + err.message;
+            let msg = 'Could not open camera stream.';
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                msg = 'Camera permission was denied. Please allow camera access in browser settings.';
+            } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                msg = 'No camera device found on this system.';
+            } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                msg = 'Camera is in use by another application.';
+            }
+            document.getElementById('mfaFaceFeedback').innerText = 'Camera Error: ' + msg;
             document.getElementById('mfaFaceStartBtn').classList.remove('hidden');
+            showToast('Camera Error', msg, 'error');
         });
 }
 
@@ -1991,7 +2008,11 @@ function updateGatewayOptions() {
     });
 }
 
+let isSubmittingDeposit = false;
+
 function startDepositVerification() {
+    if (isSubmittingDeposit) return;
+    
     let rawAmount = document.getElementById('depositAmount').value;
     if (typeof rawAmount === 'string') {
         rawAmount = rawAmount.replace(/[₹\s,]/g, '');
@@ -2005,6 +2026,8 @@ function startDepositVerification() {
         showToast('Invalid Amount', 'Transaction amount must be between ₹100 and ₹2,00,000.', 'error');
         return;
     }
+    
+    isSubmittingDeposit = true;
     
     // Hide form, show simulator screen
     document.getElementById('addMoneySetup').classList.add('hidden');
@@ -2034,6 +2057,7 @@ function submitDepositInitiate(amount, method, gateway, remarks) {
         body: JSON.stringify({ amount, method, gateway, remarks })
     })
     .then(async res => {
+        isSubmittingDeposit = false;
         const data = await res.json();
         document.getElementById('addMoneySimulator').classList.add('hidden');
         
@@ -2080,6 +2104,7 @@ function submitDepositInitiate(amount, method, gateway, remarks) {
         }
     })
     .catch(err => {
+        isSubmittingDeposit = false;
         document.getElementById('addMoneySimulator').classList.add('hidden');
         showToast('Connection Error', 'Failed to communicate with billing portal.', 'error');
         openAddMoneyModal();

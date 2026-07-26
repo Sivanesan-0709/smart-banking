@@ -209,7 +209,7 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
             return True
     except urllib.error.HTTPError as e:
         err_content = e.read().decode('utf-8')
-        print(f"[ERROR] Resend HTTP Error {e.code} during email delivery.", flush=True)
+        print(f"[ERROR] Resend HTTP Error {e.code} during email delivery: {err_content}", flush=True)
         return False
     except Exception as e:
         print("[ERROR] Network/Connection failure during Resend email delivery.", flush=True)
@@ -1315,7 +1315,7 @@ def validate_pose_alignment(face, pose):
         if deviation_y < 0.52:
             return False, "Please tilt your head slightly down."
     elif pose == 'LOOK_STRAIGHT' or pose == 'Straight':
-        if abs(deviation_x) > 0.08 or deviation_y < 0.40 or deviation_y > 0.52:
+        if abs(deviation_x) > 0.15 or deviation_y < 0.30 or deviation_y > 0.62:
             return False, "Please look straight at the camera."
             
     return True, "Pose aligned."
@@ -1444,7 +1444,7 @@ def register():
         username = data.get('username', '').strip()
         firstname = data.get('firstname', '').strip()
         lastname = data.get('lastname', '').strip()
-        email = data.get('email', '').strip()
+        email = data.get('email', '').strip().lower()
         password = data.get('password', '')
         confirm = data.get('confirm', '')
         phone = data.get('phone', '').strip()
@@ -1454,6 +1454,12 @@ def register():
 
         if not username or not email or not password or not phone:
             return jsonify({"status": "error", "message": "Required fields are missing."}), 400
+
+        if not is_valid_email(email):
+            return jsonify({"status": "error", "message": "Invalid email address format."}), 400
+
+        if len(password) < 6:
+            return jsonify({"status": "error", "message": "Password must be at least 6 characters long."}), 400
 
         if password != confirm:
             return jsonify({"status": "error", "message": "Passwords do not match."}), 400
@@ -1466,6 +1472,12 @@ def register():
         if cursor.fetchone():
             conn.close()
             return jsonify({"status": "error", "message": "Username already exists."}), 400
+
+        # Check if email exists (case-insensitive)
+        cursor.execute("SELECT * FROM NEWBANK WHERE LOWER(EMAIL) = LOWER(%s)", (email,))
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({"status": "error", "message": "Email address is already registered."}), 409
 
         hashed_pw = generate_password_hash(password)
         cursor.execute('''
@@ -2026,6 +2038,7 @@ def biometric_enroll():
             except: pass
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route('/api/biometric/delete', methods=['POST'])
 def biometric_delete():
     if 'username' not in session:
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
@@ -2035,6 +2048,7 @@ def biometric_delete():
         cursor = conn.cursor()
         user_id = session['user_id']
         
+        cursor.execute("DELETE FROM face_samples WHERE user_id = %s", (user_id,))
         cursor.execute("DELETE FROM face_enrollments WHERE user_id = %s", (user_id,))
         
         cursor.execute('''
@@ -4019,7 +4033,10 @@ def add_money_initiate():
             
             # Send confirmation email
             if email:
-                send_deposit_email(email, ref_id, amount, current_bal, new_bal)
+                try:
+                    send_deposit_email(email, ref_id, amount, current_bal, new_bal)
+                except Exception as e_mail:
+                    print(f"[WARN] Post-transaction deposit email notification failed: {e_mail}", flush=True)
                 
             return jsonify({
                 "status": "success",
@@ -6095,7 +6112,7 @@ def download_bank_statement():
             spaceAfter=15,
             alignment=0
         )
-        story.append(Paragraph("MTBL Smart Portal - Bank Statement", title_style))
+        story.append(Paragraph("Smart Banking - Bank Statement", title_style))
         story.append(Paragraph(f"<b>Statement Period:</b> {start_date} to {end_date}", styles['Normal']))
         story.append(Spacer(1, 15))
         
@@ -6233,7 +6250,7 @@ def admin_export_audit_logs_csv():
         return Response(
             mem.getvalue(),
             mimetype='text/csv',
-            headers={"Content-Disposition": "attachment;filename=MTBL_System_Audit_Logs.csv"}
+            headers={"Content-Disposition": "attachment;filename=Smart_Banking_System_Audit_Logs.csv"}
         )
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500

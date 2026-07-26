@@ -1,14 +1,12 @@
+# Smart Banking and Fraud Detection System
+## Flask, OpenCV Biometrics, Machine Learning, and Dual SQLite/PostgreSQL Database
 
-# Bank App
-## Banking app using python, pyQt5 and SQLite for database
+# INTRODUCTION
 
-
-# INTRODUCTIONS
-
-This is a simulation of a simple banking Desktop Application using Python for the core coding, This software can be used for day to day operations of Most banks with little or no need for adjustment
+This is a comprehensive Smart Banking & Real-Time Fraud Detection Web Application built with Python Flask, OpenCV YuNet & SFace Biometrics, Machine Learning, and a modern glassmorphism web interface.
 
 # Overview
--Fraud Detection in Banking Transactions is a project focused on developing a system that can detect fraudulent activities within banking transactions. The system utilizes machine learning techniques to analyze transaction data, PyQt5 for a user-friendly graphical interface, and SQLite for efficient data storage and retrieval.
+- **Smart Banking and Fraud Detection System** is designed to process digital banking transactions, evaluate hybrid risk scores in real-time, enforce biometric face liveness and Email OTP MFA, and detect potential fraud before funds move.
 
 # Technologies used
 -Python

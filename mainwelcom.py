@@ -115,8 +115,8 @@ class Ui_Page(object):
 
     def retranslateUi(self, WelcomePage):
         _translate = QtCore.QCoreApplication.translate
-        WelcomePage.setWindowTitle(_translate("WelcomePage", "Welcome to MTBL"))
-        self.label.setText(_translate("WelcomePage", "Welcome to MT Bank Limited"))
+        WelcomePage.setWindowTitle(_translate("WelcomePage", "Smart Banking and Fraud Detection System"))
+        self.label.setText(_translate("WelcomePage", "Smart Banking and Fraud Detection System"))
         self.label_2.setText(_translate("WelcomePage", "Do You Have An Existing Account?"))
         self.pushButton_WELCOME_YES.setText(_translate("WelcomePage", "YES"))
         self.pushButton_WELCOME_NO.setText(_translate("WelcomePage", "NO"))
