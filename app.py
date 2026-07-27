@@ -218,6 +218,33 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
         print(f"[ERROR] Network/Connection failure during Resend email delivery: {e}", flush=True)
         return False, "NETWORK_ERROR" 
 
+def parse_datetime_safe(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime.datetime):
+        if val.tzinfo is not None:
+            return val.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return val
+    if isinstance(val, str):
+        val_clean = val.strip().replace('T', ' ')
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.datetime.strptime(val_clean.split('+')[0].split('Z')[0], fmt)
+            except ValueError:
+                pass
+        try:
+            dt = datetime.datetime.fromisoformat(val)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return dt
+        except Exception:
+            pass
+    return None
+
+def get_utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 def clean_and_parse_amount(val):
     if val is None:
         return 0.0
@@ -3121,8 +3148,9 @@ def transfer_verify():
             conn.close()
             return jsonify({"status": "error", "message": "Verification challenge not found."}), 404
             
-        utc_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        if challenge['expires_at'] < utc_now or challenge['consumed'] or challenge['verified']:
+        exp_dt = parse_datetime_safe(challenge['expires_at'])
+        now_dt = get_utc_now()
+        if (exp_dt and exp_dt < now_dt) or challenge['consumed'] or challenge['verified']:
             conn.close()
             return jsonify({"status": "error", "message": "Verification challenge has expired or already been consumed."}), 400
             
@@ -3224,20 +3252,12 @@ def otp_resend():
             conn.close()
             return jsonify({"status": "error", "message": "Maximum OTP resend limit (3) exceeded. Please restart the transaction."}), 400
             
-        last_sent_str = challenge['last_sent_at']
-        if last_sent_str:
-            try:
-                cursor.execute('''
-                SELECT (strftime('%s', 'now') - strftime('%s', %s)) AS diff
-                ''', (last_sent_str,))
-                diff_row = cursor.fetchone()
-                diff = diff_row['diff'] if diff_row else 999
-                
-                if diff is not None and diff < 60:
-                    conn.close()
-                    return jsonify({"status": "error", "message": f"Please wait {60 - int(diff)} seconds before resending."}), 400
-            except Exception as ex:
-                pass
+        last_sent_dt = parse_datetime_safe(challenge['last_sent_at'])
+        if last_sent_dt:
+            diff = (get_utc_now() - last_sent_dt).total_seconds()
+            if diff < 60:
+                conn.close()
+                return jsonify({"status": "error", "message": f"Please wait {60 - int(diff)} seconds before resending."}), 400
                 
         otp = f"{secrets.randbelow(1000000):06d}"
         otp_hashed = hash_otp(otp)
@@ -3303,8 +3323,9 @@ def finalize_pending_transaction(token):
             conn.close()
             return jsonify({"status": "error", "message": "Transaction has already been processed or expired."}), 400
             
-        utc_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        if pending['expires_at'] < utc_now:
+        exp_dt = parse_datetime_safe(pending['expires_at'])
+        now_dt = get_utc_now()
+        if exp_dt and exp_dt < now_dt:
             cursor.execute("UPDATE pending_transactions SET status = 'EXPIRED' WHERE token = ?", (token,))
             conn.commit()
             conn.close()
