@@ -3385,3 +3385,20 @@ class TestRazorpayPaymentGateway(unittest.TestCase):
         self.assertEqual(cursor.fetchone()['BAL'], 10000.0)
         conn.close()
 
+    def test_17_ml_explainer_sandbox_endpoint(self):
+        res = self.client.post('/api/model/explain', json={
+            "type": "TRANSFER",
+            "amount": 50000,
+            "oldbalanceOrig": 50000,
+            "newbalanceOrig": 0,
+            "oldbalanceDest": 0,
+            "newbalanceDest": 0
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertIn("is_fraud", data)
+        self.assertIn("probability", data)
+        self.assertIn("reasons", data)
+        self.assertIsInstance(data["reasons"], list)
+
+

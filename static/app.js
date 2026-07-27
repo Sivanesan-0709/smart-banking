@@ -3307,8 +3307,18 @@ function initiateRazorpayPayment(amount) {
         body: JSON.stringify({ amount: amount })
     })
     .then(async res => {
-        const data = await res.json();
-        if (res.status === 200 && data.status === 'success') {
+        let data = {};
+        const responseText = await res.text();
+        try {
+            data = JSON.parse(responseText);
+        } catch (e) {
+            data = {
+                status: 'error',
+                message: `Server returned HTTP ${res.status} (${res.statusText || 'Error'}).`
+            };
+        }
+
+        if (res.ok && res.status === 200 && data.status === 'success') {
             const options = {
                 key: data.key_id,
                 amount: data.amount,
@@ -3344,13 +3354,14 @@ function initiateRazorpayPayment(amount) {
             }
         } else {
             isSubmittingDeposit = false;
-            showToast('Order Error', data.message || 'Could not create Razorpay payment order.', 'error');
+            const errMsg = data.message || `Server Error (${res.status}): Could not create Razorpay payment order.`;
+            showToast('Order Error', errMsg, 'error');
         }
     })
     .catch(err => {
         isSubmittingDeposit = false;
-        console.error("Create Order Error:", err);
-        showToast('Network Error', 'Connection to payment server failed.', 'error');
+        console.error("Create Order Connection Error:", err);
+        showToast('Network Error', 'Could not connect to payment server.', 'error');
     });
 }
 
@@ -3368,18 +3379,144 @@ function verifyRazorpayPayment(response, referenceId, amountInr) {
     })
     .then(async res => {
         isSubmittingDeposit = false;
-        const data = await res.json();
-        if (res.status === 200 && data.status === 'success') {
+        let data = {};
+        const responseText = await res.text();
+        try {
+            data = JSON.parse(responseText);
+        } catch (e) {
+            data = {
+                status: 'error',
+                message: `Server returned HTTP ${res.status} (${res.statusText || 'Error'}).`
+            };
+        }
+
+        if (res.ok && res.status === 200 && data.status === 'success') {
             closeAddMoneyModal();
             loadDashboardData();
             showToast('Payment Successful', `INR ${data.amount || amountInr} added to your Smart Wallet!`, 'success');
         } else {
-            showToast('Verification Failed', data.message || 'Signature verification failed. Wallet balance was NOT changed.', 'error');
+            const errMsg = data.message || `Verification failed (HTTP ${res.status}). Wallet balance was NOT changed.`;
+            showToast('Verification Failed', errMsg, 'error');
         }
     })
     .catch(err => {
         isSubmittingDeposit = false;
-        console.error("Payment Verification Error:", err);
+        console.error("Payment Verification Connection Error:", err);
         showToast('Network Error', 'Verification connection failed.', 'error');
     });
+}
+
+
+// --- 4b. ML Explainer Sandbox Handler ---
+function handleExplain(e) {
+    if (e && typeof e.preventDefault === 'function') {
+        e.preventDefault();
+    }
+
+    const typeEl = document.getElementById('expType');
+    const amountEl = document.getElementById('expAmount');
+    const oldOrigEl = document.getElementById('expOldOrig');
+    const newOrigEl = document.getElementById('expNewOrig');
+    const oldDestEl = document.getElementById('expOldDest');
+    const newDestEl = document.getElementById('expNewDest');
+
+    const expType = typeEl ? typeEl.value : 'TRANSFER';
+    const expAmount = amountEl ? parseFloat(amountEl.value || 0) : 0;
+    const expOldOrig = oldOrigEl ? parseFloat(oldOrigEl.value || 0) : 0;
+    const expNewOrig = newOrigEl ? parseFloat(newOrigEl.value || 0) : 0;
+    const expOldDest = oldDestEl ? parseFloat(oldDestEl.value || 0) : 0;
+    const expNewDest = newDestEl ? parseFloat(newDestEl.value || 0) : 0;
+
+    const resultsBox = document.getElementById('explainResults');
+    const badge = document.getElementById('explainVerdictBadge');
+    const probText = document.getElementById('explainProbText');
+    const reasonsList = document.getElementById('explainReasonsList');
+
+    if (resultsBox) {
+        resultsBox.classList.remove('hidden');
+    }
+    if (badge) {
+        badge.className = 'result-badge';
+        badge.innerText = 'ANALYZING...';
+        badge.style.background = 'rgba(155, 93, 229, 0.2)';
+        badge.style.color = '#fff';
+    }
+    if (probText) {
+        probText.innerText = 'Calculating...';
+    }
+    if (reasonsList) {
+        reasonsList.innerHTML = '<li style="color: var(--text-secondary);"><i class="fa-solid fa-spinner fa-spin"></i> Evaluating ML Random Forest decision trees...</li>';
+    }
+
+    fetch('/api/model/explain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            type: expType,
+            amount: expAmount,
+            oldbalanceOrig: expOldOrig,
+            newbalanceOrig: expNewOrig,
+            oldbalanceDest: expOldDest,
+            newbalanceDest: expNewDest
+        })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status !== 'error') {
+            const isFraud = Boolean(data.is_fraud);
+            const prob = typeof data.probability === 'number' ? data.probability : 0.0;
+            const reasons = data.reasons || [];
+
+            if (badge) {
+                badge.className = isFraud ? 'result-badge badge-danger' : 'result-badge badge-success';
+                badge.innerText = isFraud ? 'FRAUD DETECTED' : 'APPROVED';
+                badge.style.background = '';
+                badge.style.color = '';
+            }
+            if (probText) {
+                probText.innerText = prob.toFixed(1) + '%';
+            }
+            if (reasonsList) {
+                if (reasons.length > 0) {
+                    reasonsList.innerHTML = reasons.map(r => 
+                        `<li><i class="fa-solid ${isFraud ? 'fa-triangle-exclamation text-danger' : 'fa-circle-check text-success'}"></i> ${r}</li>`
+                    ).join('');
+                } else {
+                    reasonsList.innerHTML = '<li><i class="fa-solid fa-info-circle text-info"></i> Standard parameters evaluated.</li>';
+                }
+            }
+        } else {
+            if (badge) {
+                badge.className = 'result-badge badge-danger';
+                badge.innerText = 'ERROR';
+                badge.style.background = '';
+                badge.style.color = '';
+            }
+            if (probText) {
+                probText.innerText = 'N/A';
+            }
+            if (reasonsList) {
+                reasonsList.innerHTML = `<li class="text-danger"><i class="fa-solid fa-circle-xmark"></i> ${data.message || 'Failed to obtain ML prediction analysis.'}</li>`;
+            }
+            showToast('Analysis Error', data.message || 'Failed to run ML prediction.', 'error');
+        }
+    })
+    .catch(err => {
+        console.error("ML Explainer Error:", err);
+        if (badge) {
+            badge.className = 'result-badge badge-danger';
+            badge.innerText = 'ERROR';
+            badge.style.background = '';
+            badge.style.color = '';
+        }
+        if (probText) {
+            probText.innerText = 'N/A';
+        }
+        if (reasonsList) {
+            reasonsList.innerHTML = '<li class="text-danger"><i class="fa-solid fa-circle-xmark"></i> Network connection error while communicating with ML service.</li>';
+        }
+        showToast('Network Error', 'Connection failed while reaching ML Explainer service.', 'error');
+    });
+
+    return false;
 }

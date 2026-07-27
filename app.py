@@ -6363,11 +6363,6 @@ Thank you for choosing Smart Banking.
 load_ml_model()
 load_face_models()
 
-if __name__ == '__main__':
-    init_db()
-    port = int(os.environ.get('PORT', 5001))
-    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
-    socketio.run(app, host='0.0.0.0', port=port, debug=is_dev, use_reloader=False, allow_unsafe_werkzeug=is_dev)
 
 
 # --- Razorpay Payment Gateway (Test Mode) Endpoints ---
@@ -6646,3 +6641,10 @@ def razorpay_verify_payment():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": f"Payment verification error: {str(e)}"}), 500
+
+
+if __name__ == '__main__':
+    init_db()
+    port = int(os.environ.get('PORT', 5001))
+    is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
+    socketio.run(app, host='0.0.0.0', port=port, debug=is_dev, use_reloader=False, allow_unsafe_werkzeug=is_dev)
