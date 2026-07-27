@@ -666,6 +666,17 @@ def run_biometric_migrations(cursor, is_postgres):
         except Exception:
             pass
 
+def run_razorpay_migrations(cursor, is_postgres):
+    cols = {
+        'razorpay_order_id': 'VARCHAR(100)' if is_postgres else 'TEXT',
+        'razorpay_payment_id': 'VARCHAR(100)' if is_postgres else 'TEXT'
+    }
+    for col, col_type in cols.items():
+        try:
+            cursor.execute(f"ALTER TABLE deposits ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass
+
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -6360,17 +6371,6 @@ if __name__ == '__main__':
 
 
 # --- Razorpay Payment Gateway (Test Mode) Endpoints ---
-
-def run_razorpay_migrations(cursor, is_postgres):
-    cols = {
-        'razorpay_order_id': 'VARCHAR(100)' if is_postgres else 'TEXT',
-        'razorpay_payment_id': 'VARCHAR(100)' if is_postgres else 'TEXT'
-    }
-    for col, col_type in cols.items():
-        try:
-            cursor.execute(f"ALTER TABLE deposits ADD COLUMN {col} {col_type}")
-        except Exception:
-            pass
 
 @app.route('/api/payment/create-order', methods=['POST'])
 def razorpay_create_order():
