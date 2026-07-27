@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -838,7 +839,7 @@
     <div id="addMoneyModal" class="modal hidden">
         <div class="modal-content glass-card" style="max-width: 500px;">
             <div class="modal-header">
-                <h2><i class="fa-solid fa-wallet"></i> Smart Wallet Top-Up</h2>
+                <h2><i class="fa-solid fa-wallet"></i> Smart Wallet Top-Up <span class="badge badge-info" style="font-size: 0.72rem; margin-left: 6px; font-weight: 500;"><i class="fa-solid fa-flask"></i> Payment Gateway — Test Mode</span></h2>
                 <button class="close-modal" onclick="closeAddMoneyModal()">&times;</button>
             </div>
             
@@ -1258,7 +1259,7 @@
             </div>
             <div class="modal-body text-center">
                 <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 12px;">
-                    We will capture 5 quality samples of your face (Straight, Left, Right, Up, Down) to establish a secure biometric identity lock.
+                    We will capture 3 quality samples of your face looking straight at the camera to establish a secure biometric identity lock.
                 </p>
                 
                 <div class="camera-container" style="position: relative; border-radius: 12px; overflow: hidden; background: #000; border: 2px solid rgba(155, 93, 229, 0.3); height: 280px; display: flex; align-items: center; justify-content: center; margin: 0 auto; max-width: 380px;">
@@ -1275,11 +1276,9 @@
                 
                 <!-- Sample Progress indicators -->
                 <div class="sample-indicators" style="display: flex; justify-content: center; gap: 15px; margin-top: 15px;">
-                    <div class="sample-dot" id="sampleDot1" title="Straight" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">1</div>
-                    <div class="sample-dot" id="sampleDot2" title="Slight Left" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">2</div>
-                    <div class="sample-dot" id="sampleDot3" title="Slight Right" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">3</div>
-                    <div class="sample-dot" id="sampleDot4" title="Slight Up" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">4</div>
-                    <div class="sample-dot" id="sampleDot5" title="Slight Down" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">5</div>
+                    <div class="sample-dot" id="sampleDot1" title="Capture 1" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">1</div>
+                    <div class="sample-dot" id="sampleDot2" title="Capture 2" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">2</div>
+                    <div class="sample-dot" id="sampleDot3" title="Capture 3" style="width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff;">3</div>
                 </div>
                 
                 <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center;">

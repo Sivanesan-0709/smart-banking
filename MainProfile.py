@@ -192,7 +192,7 @@ class Ui_MainWindow(QWidget):
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
         MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
-        self.label.setText(_translate("MainWindow", "WELCOME TO Your MTBL DASHBOARD"))
+        self.label.setText(_translate("MainWindow", "WELCOME TO YOUR SMART BANKING DASHBOARD"))
         self.pushButton_balance.setText(_translate("MainWindow", "BALANCE"))
         self.pushButton_deleteAccount.setText(_translate("MainWindow", "DELETE ACCOUNT"))
         self.pushButton_transfer.setText(_translate("MainWindow", "TRANSFER"))

@@ -427,9 +427,9 @@ function handleAccountDelete(e) {
 // --- 1. Face Biometrics Enrollment Wizard ---
 let enrollStream = null;
 let enrollSamples = [];
-const maxEnrollSamples = 5;
-const enrollPoses = ['Straight', 'Slight Left', 'Slight Right', 'Slight Up', 'Slight Down'];
-const enrollPoseInstructions = ['Look straight at the camera.', 'Turn your head slightly to the left.', 'Turn your head slightly to the right.', 'Tilt your head slightly up.', 'Tilt your head slightly down.'];
+const maxEnrollSamples = 3;
+const enrollPoses = ['Straight', 'Straight', 'Straight'];
+const enrollPoseInstructions = ['Look straight at the camera and keep your face clearly visible.', 'Look straight at the camera and keep your face clearly visible.', 'Look straight at the camera and keep your face clearly visible.'];
 
 function loadBiometricStatus() {
     fetch('/api/biometric/status')
@@ -533,7 +533,7 @@ function updateEnrollProgress() {
 function updatePoseInstructions() {
     const idx = enrollSamples.length;
     if (idx < maxEnrollSamples) {
-        document.getElementById('enrollFeedback').innerText = `Pose ${idx+1}/5 [${enrollPoses[idx]}]: ${enrollPoseInstructions[idx]}`;
+        document.getElementById('enrollFeedback').innerText = `Capture ${idx+1}/3: ${enrollPoseInstructions[idx]}`;
     }
 }
 
@@ -586,7 +586,7 @@ function captureEnrollSample() {
     const idx = enrollSamples.length;
     const pose = enrollPoses[idx];
     
-    document.getElementById('enrollFeedback').innerText = `Validating quality for sample ${idx+1}/5...`;
+    document.getElementById('enrollFeedback').innerText = `Validating quality for capture ${idx+1}/3...`;
     
     fetch('/api/biometric/enroll/sample', {
         method: 'POST',
@@ -2028,6 +2028,12 @@ function startDepositVerification() {
     }
     
     isSubmittingDeposit = true;
+
+    // Use Razorpay Checkout if SDK is loaded
+    if (typeof window.Razorpay === 'function') {
+        initiateRazorpayPayment(amount);
+        return;
+    }
     
     // Hide form, show simulator screen
     document.getElementById('addMoneySetup').classList.add('hidden');
@@ -3289,4 +3295,91 @@ function handlePasswordUpdate(e) {
         }
     })
     .catch(() => showToast('Network Error', 'Could not establish connection.', 'error'));
+}
+
+
+// --- Razorpay Payment Gateway (Test Mode) Integration ---
+
+function initiateRazorpayPayment(amount) {
+    fetch('/api/payment/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: amount })
+    })
+    .then(async res => {
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            const options = {
+                key: data.key_id,
+                amount: data.amount,
+                currency: data.currency || "INR",
+                name: "Smart Banking",
+                description: "Smart Wallet Top-Up (Test Mode)",
+                order_id: data.order_id,
+                prefill: {
+                    name: data.customer_name || "",
+                    email: data.customer_email || "",
+                    contact: data.customer_phone || ""
+                },
+                theme: {
+                    color: "#9b5ded"
+                },
+                handler: function (response) {
+                    verifyRazorpayPayment(response, data.reference_id, data.amount_inr);
+                },
+                modal: {
+                    ondismiss: function() {
+                        isSubmittingDeposit = false;
+                        showToast('Payment Cancelled', 'Razorpay Checkout was cancelled.', 'info');
+                    }
+                }
+            };
+            try {
+                const rzp = new Razorpay(options);
+                rzp.open();
+            } catch (err) {
+                isSubmittingDeposit = false;
+                console.error("Razorpay Checkout Launch Error:", err);
+                showToast('Payment Error', 'Failed to launch Razorpay Checkout.', 'error');
+            }
+        } else {
+            isSubmittingDeposit = false;
+            showToast('Order Error', data.message || 'Could not create Razorpay payment order.', 'error');
+        }
+    })
+    .catch(err => {
+        isSubmittingDeposit = false;
+        console.error("Create Order Error:", err);
+        showToast('Network Error', 'Connection to payment server failed.', 'error');
+    });
+}
+
+function verifyRazorpayPayment(response, referenceId, amountInr) {
+    showToast('Verifying Payment', 'Cryptographically verifying Razorpay payment signature...', 'info');
+    fetch('/api/payment/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature,
+            reference_id: referenceId
+        })
+    })
+    .then(async res => {
+        isSubmittingDeposit = false;
+        const data = await res.json();
+        if (res.status === 200 && data.status === 'success') {
+            closeAddMoneyModal();
+            loadDashboardData();
+            showToast('Payment Successful', `INR ${data.amount || amountInr} added to your Smart Wallet!`, 'success');
+        } else {
+            showToast('Verification Failed', data.message || 'Signature verification failed. Wallet balance was NOT changed.', 'error');
+        }
+    })
+    .catch(err => {
+        isSubmittingDeposit = false;
+        console.error("Payment Verification Error:", err);
+        showToast('Network Error', 'Verification connection failed.', 'error');
+    });
 }

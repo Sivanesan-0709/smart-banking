@@ -2379,7 +2379,7 @@ class BankAppTestCase(unittest.TestCase):
     @patch('app.decode_base64_image')
     @patch('app.validate_face_quality')
     @patch('app.extract_face_embedding')
-    def test_biometric_enroll_5_samples(self, mock_extract, mock_quality, mock_decode):
+    def test_biometric_enroll_3_samples(self, mock_extract, mock_quality, mock_decode):
         import numpy as np
         mock_extract.return_value = [0.1] * 128
         mock_decode.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -2389,7 +2389,7 @@ class BankAppTestCase(unittest.TestCase):
         self.login_user('enroll_5_user', 'pass123')
         
         res = self.client.post('/api/biometric/enroll', json={
-            "images": ["img1", "img2", "img3", "img4", "img5"]
+            "images": ["img1", "img2", "img3"]
         })
         self.assertEqual(res.status_code, 200)
         data = json.loads(res.data)
@@ -2399,7 +2399,7 @@ class BankAppTestCase(unittest.TestCase):
         cursor = conn.cursor()
         cursor.execute("SELECT image_path, image_hash, width, height FROM face_samples WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'enroll_5_user')")
         samples = cursor.fetchall()
-        self.assertEqual(len(samples), 5)
+        self.assertEqual(len(samples), 3)
         for s in samples:
             self.assertTrue(os.path.exists(s['image_path']))
             self.assertEqual(s['width'], 640)
@@ -2424,7 +2424,7 @@ class BankAppTestCase(unittest.TestCase):
         self.login_user('verify_save_user', 'pass123')
         
         self.client.post('/api/biometric/enroll', json={
-            "images": ["img1", "img2", "img3", "img4", "img5"]
+            "images": ["img1", "img2", "img3"]
         })
         
         self.client.post('/api/biometric/verify/initiate')
@@ -2457,7 +2457,7 @@ class BankAppTestCase(unittest.TestCase):
         self.login_user('debug_user', 'pass123')
         
         self.client.post('/api/biometric/enroll', json={
-            "images": ["img1", "img2", "img3", "img4", "img5"]
+            "images": ["img1", "img2", "img3"]
         })
         
         conn = get_db_connection()
@@ -2527,7 +2527,7 @@ class BankAppTestCase(unittest.TestCase):
             self.login_user('missing_model_user', 'pass123')
             
             res = self.client.post('/api/biometric/enroll', json={
-                "images": ["img1", "img2", "img3", "img4", "img5"]
+                "images": ["img1", "img2", "img3"]
             })
             self.assertEqual(res.status_code, 400)
             data = json.loads(res.data)
@@ -2991,3 +2991,397 @@ if __name__ == '__main__':
         user_agent_val = req.headers.get('User-agent') or req.headers.get('User-Agent')
         self.assertIsNotNone(user_agent_val)
         self.assertEqual(user_agent_val, "Smart-Banking-Fraud-Detection/1.0")
+
+
+    @patch('app.decode_base64_image')
+    @patch('app.validate_face_quality')
+    @patch('app.extract_face_embedding')
+    @patch('app.check_liveness_challenge')
+    @patch('app.calculate_similarity')
+    def test_biometric_3_capture_flow_and_compatibility(self, mock_similarity, mock_liveness, mock_extract, mock_quality, mock_decode):
+        import numpy as np
+        mock_decode.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
+        mock_quality.return_value = {"status": "success", "face": [0,0,200,200, 50,50, 150,50, 100,100, 70,150, 130,150, 0.99]}
+        mock_extract.return_value = [0.1] * 128
+        mock_liveness.return_value = True
+        mock_similarity.return_value = (True, 0.85, 0.363)
+
+        self.register_user('flow_user', 'flow_user@test.com', 'pass123', 'pass123', '999')
+        self.login_user('flow_user', 'pass123')
+
+        # 1. Reject 1 or 2 captures
+        res_short = self.client.post('/api/biometric/enroll', json={"images": ["img1", "img2"]})
+        self.assertEqual(res_short.status_code, 400)
+        self.assertIn("requires exactly 3 face samples", json.loads(res_short.data)['message'])
+
+        # 2. Complete 3 valid captures enrollment
+        res_enroll = self.client.post('/api/biometric/enroll', json={"images": ["img1", "img2", "img3"]})
+        self.assertEqual(res_enroll.status_code, 200)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as cnt FROM face_samples WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'flow_user')")
+        sample_count = cursor.fetchone()['cnt']
+        self.assertEqual(sample_count, 3)
+
+        cursor.execute("SELECT template_reference, model_name FROM face_enrollments WHERE user_id = (SELECT ID FROM NEWBANK WHERE USERNAME = 'flow_user')")
+        enrollment = cursor.fetchone()
+        self.assertEqual(enrollment['model_name'], 'SFace')
+        tpl = json.loads(enrollment['template_reference'])
+        self.assertEqual(len(tpl), 128)
+        conn.close()
+
+        # 3. Test verification works with 3-capture template
+        self.client.post('/api/biometric/verify/initiate')
+        res_check = self.client.post('/api/biometric/verify/check', json={"image": "verify_img"})
+        self.assertEqual(res_check.status_code, 200)
+        self.assertTrue(json.loads(res_check.data)['verified'])
+
+        # 4. Test legacy 5-sample template compatibility by direct insertion
+        self.register_user('legacy_user', 'legacy@test.com', 'pass123', 'pass123', '999')
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = 'legacy_user'")
+        legacy_id = cursor.fetchone()['ID']
+        
+        # Insert 5 samples into face_samples
+        for i in range(5):
+            cursor.execute("INSERT INTO face_samples (user_id, sample_index, image_path, image_hash, width, height, embedding) VALUES (%s, %s, 'path', 'hash', 640, 480, %s)", (legacy_id, i, json.dumps([0.1]*128)))
+        cursor.execute("INSERT INTO face_enrollments (user_id, template_reference, model_name, model_version, status) VALUES (%s, %s, 'SFace', '1.0', 'ACTIVE')", (legacy_id, json.dumps([0.1]*128)))
+        conn.commit()
+        conn.close()
+
+        self.login_user('legacy_user', 'pass123')
+        self.client.post('/api/biometric/verify/initiate')
+        res_legacy = self.client.post('/api/biometric/verify/check', json={"image": "verify_img"})
+        self.assertEqual(res_legacy.status_code, 200)
+        self.assertTrue(json.loads(res_legacy.data)['verified'])
+
+        # 5. Delete enrollment and verify status returns disabled
+        res_del = self.client.post('/api/biometric/delete')
+        self.assertEqual(res_del.status_code, 200)
+        
+        res_st = self.client.get('/api/biometric/status')
+        self.assertFalse(json.loads(res_st.data)['enrolled'])
+
+
+class TestRazorpayPaymentGateway(unittest.TestCase):
+    def setUp(self):
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+        self.client = app.test_client()
+        self.app_context = app.app_context()
+        self.app_context.push()
+        
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM NEWBANK")
+            cursor.execute("DELETE FROM deposits")
+            cursor.execute("DELETE FROM NEWT")
+            cursor.execute("DELETE FROM biometric_security_events")
+            conn.commit()
+            conn.close()
+
+    def tearDown(self):
+        self.app_context.pop()
+
+    def register_and_login(self, username="rzp_user", email="rzp_user@test.com"):
+        self.client.post('/api/register', json={
+            "username": username,
+            "firstname": "Razor",
+            "lastname": "Pay",
+            "email": email,
+            "password": "password123",
+            "confirm": "password123",
+            "phone": "08122223333",
+            "sex": "Male",
+            "address": "123 Test St",
+            "bal": 10000.0
+        })
+        self.client.post('/api/login', json={
+            "username": username,
+            "password": "password123"
+        })
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_1_missing_razorpay_configuration(self):
+        self.register_and_login()
+        res = self.client.post('/api/payment/create-order', json={"amount": 500})
+        self.assertEqual(res.status_code, 400)
+        data = json.loads(res.data)
+        self.assertIn("not configured", data['message'])
+
+    def test_2_unauthenticated_create_order(self):
+        res = self.client.post('/api/payment/create-order', json={"amount": 500})
+        self.assertEqual(res.status_code, 401)
+
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_3_invalid_amount_rejection(self):
+        self.register_and_login()
+        
+        # Zero amount
+        res_zero = self.client.post('/api/payment/create-order', json={"amount": 0})
+        self.assertEqual(res_zero.status_code, 400)
+        
+        # Negative amount
+        res_neg = self.client.post('/api/payment/create-order', json={"amount": -500})
+        self.assertEqual(res_neg.status_code, 400)
+        
+        # Exceeds max limit
+        res_max = self.client.post('/api/payment/create-order', json={"amount": 300000})
+        self.assertEqual(res_max.status_code, 400)
+
+    @patch('razorpay.Client')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_4_5_inr_to_paise_and_successful_order_creation(self, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {
+            "id": "order_test_12345",
+            "amount": 50000,
+            "currency": "INR",
+            "status": "created"
+        }
+
+        res = self.client.post('/api/payment/create-order', json={"amount": 500})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        
+        # Check INR to Paise conversion
+        self.assertEqual(data['amount'], 50000)
+        self.assertEqual(data['amount_inr'], 500.0)
+        self.assertEqual(data['order_id'], "order_test_12345")
+        self.assertEqual(data['key_id'], "rzp_test_key")
+
+        # Verify wallet balance NOT changed yet
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        bal = cursor.fetchone()['BAL']
+        self.assertEqual(bal, 10000.0)
+        conn.close()
+
+    @patch('razorpay.Client')
+    @patch('app.send_deposit_email')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_6_8_9_11_12_13_payment_verification_success(self, mock_send_email, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_success_100"}
+        mock_instance.utility.verify_payment_signature.return_value = True
+
+        # Create Order
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 1000})
+        ord_data = json.loads(res_ord.data)
+        ref_id = ord_data['reference_id']
+
+        # Verify Payment
+        res_ver = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_success_100",
+            "razorpay_payment_id": "pay_success_100",
+            "razorpay_signature": "valid_signature_hash",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_ver.status_code, 200)
+        ver_data = json.loads(res_ver.data)
+        self.assertEqual(ver_data['status'], 'success')
+        self.assertEqual(ver_data['new_balance'], 11000.0)
+
+        # Check DB updates: wallet balance, deposits record, NEWT ledger
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['BAL'], 11000.0)
+
+        cursor.execute("SELECT status, razorpay_order_id, razorpay_payment_id FROM deposits WHERE reference_id = %s", (ref_id,))
+        dep_row = cursor.fetchone()
+        self.assertEqual(dep_row['status'], 'APPROVED')
+        self.assertEqual(dep_row['razorpay_order_id'], 'order_success_100')
+        self.assertEqual(dep_row['razorpay_payment_id'], 'pay_success_100')
+
+        # Check NEWT ledger entry created exactly once
+        cursor.execute("SELECT COUNT(*) as cnt FROM NEWT WHERE SENDER = 'rzp_user' AND TTYPE = 'ADD_MONEY'")
+        self.assertEqual(cursor.fetchone()['cnt'], 1)
+        conn.close()
+
+        # Check confirmation email triggered
+        self.assertTrue(mock_send_email.called)
+
+    @patch('razorpay.Client')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_7_invalid_signature_rejection(self, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_bad_sig"}
+        import razorpay
+        mock_instance.utility.verify_payment_signature.side_effect = razorpay.errors.SignatureVerificationError("Invalid Signature")
+
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 500})
+        ref_id = json.loads(res_ord.data)['reference_id']
+
+        # Verify with invalid signature
+        res_ver = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_bad_sig",
+            "razorpay_payment_id": "pay_bad_sig",
+            "razorpay_signature": "invalid_sig_hash",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_ver.status_code, 400)
+        self.assertIn("Invalid Razorpay payment signature", json.loads(res_ver.data)['message'])
+
+        # Verify wallet balance was NOT changed
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['BAL'], 10000.0)
+        conn.close()
+
+    @patch('razorpay.Client')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_10_idempotency_duplicate_payment_protection(self, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_idempotent"}
+        mock_instance.utility.verify_payment_signature.return_value = True
+
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 2000})
+        ref_id = json.loads(res_ord.data)['reference_id']
+
+        # First verification (Success -> +2000 -> 12000)
+        res_v1 = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_idempotent",
+            "razorpay_payment_id": "pay_dup_100",
+            "razorpay_signature": "valid_sig",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_v1.status_code, 200)
+
+        # Duplicate verification request with same razorpay_payment_id
+        res_v2 = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_idempotent",
+            "razorpay_payment_id": "pay_dup_100",
+            "razorpay_signature": "valid_sig",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_v2.status_code, 200)
+        data_v2 = json.loads(res_v2.data)
+        self.assertTrue(data_v2.get('already_processed', False))
+
+        # Verify wallet balance was credited EXACTLY ONCE (12000, not 14000)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['BAL'], 12000.0)
+
+        # Verify NEWT ledger entry created exactly once
+        cursor.execute("SELECT COUNT(*) as cnt FROM NEWT WHERE SENDER = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['cnt'], 1)
+        conn.close()
+
+    @patch('razorpay.Client')
+    @patch('app.send_deposit_email')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_14_email_failure_does_not_reverse_or_double_credit(self, mock_send_email, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_mail_fail"}
+        mock_instance.utility.verify_payment_signature.return_value = True
+        mock_send_email.side_effect = Exception("SMTP Server Connection Timeout")
+
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 1500})
+        ref_id = json.loads(res_ord.data)['reference_id']
+
+        # Verification succeeds even if email dispatch throws exception
+        res_ver = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_mail_fail",
+            "razorpay_payment_id": "pay_mail_fail_1",
+            "razorpay_signature": "valid_sig",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_ver.status_code, 200)
+
+        # Verify balance updated to 11500
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['BAL'], 11500.0)
+        conn.close()
+
+    @patch('razorpay.Client')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_15_valid_signature_unsuccessful_payment_state_rejection(self, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_failed_state"}
+        mock_instance.utility.verify_payment_signature.return_value = True
+        # Payment fetch returns 'failed' status
+        mock_instance.payment.fetch.return_value = {
+            "id": "pay_failed_state",
+            "order_id": "order_failed_state",
+            "status": "failed",
+            "amount": 50000
+        }
+
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 500})
+        ref_id = json.loads(res_ord.data)['reference_id']
+
+        res_ver = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_failed_state",
+            "razorpay_payment_id": "pay_failed_state",
+            "razorpay_signature": "valid_sig",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_ver.status_code, 400)
+        self.assertIn("not captured/successful", json.loads(res_ver.data)['message'])
+
+        # Verify wallet balance was NOT changed
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['BAL'], 10000.0)
+        conn.close()
+
+    @patch('razorpay.Client')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_16_payment_order_mismatch_rejection(self, mock_rzp_client):
+        self.register_and_login()
+        mock_instance = MagicMock()
+        mock_rzp_client.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_expected_1"}
+        mock_instance.utility.verify_payment_signature.return_value = True
+        # Payment fetch returns a DIFFERENT order_id
+        mock_instance.payment.fetch.return_value = {
+            "id": "pay_mismatched",
+            "order_id": "order_DIFFERENT_999",
+            "status": "captured",
+            "amount": 50000
+        }
+
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 500})
+        ref_id = json.loads(res_ord.data)['reference_id']
+
+        res_ver = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_expected_1",
+            "razorpay_payment_id": "pay_mismatched",
+            "razorpay_signature": "valid_sig",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_ver.status_code, 400)
+        self.assertIn("does not match expected order ID", json.loads(res_ver.data)['message'])
+
+        # Verify wallet balance was NOT changed
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'rzp_user'")
+        self.assertEqual(cursor.fetchone()['BAL'], 10000.0)
+        conn.close()
+
