@@ -211,10 +211,12 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
     except urllib.error.HTTPError as e:
         err_content = e.read().decode('utf-8')
         print(f"[ERROR] Resend HTTP Error {e.code} during email delivery: {err_content}", flush=True)
-        return False
+        if e.code == 403 or "1010" in err_content or "validation_error" in err_content or "testing" in err_content.lower() or "domain" in err_content.lower():
+            return False, "RESEND_TEST_DOMAIN_RESTRICTION"
+        return False, f"HTTP_{e.code}"
     except Exception as e:
-        print("[ERROR] Network/Connection failure during Resend email delivery.", flush=True)
-        return False
+        print(f"[ERROR] Network/Connection failure during Resend email delivery: {e}", flush=True)
+        return False, "NETWORK_ERROR" 
 
 def clean_and_parse_amount(val):
     if val is None:
@@ -394,6 +396,9 @@ Thank you for banking with Smart Banking."""
     return True
 
 def send_otp_email(recipient_email, otp, amount, receiver):
+    if os.environ.get('SIMULATE_RESEND_TEST_RESTRICTION') == '1':
+        print(f"[DEBUG] [SIMULATED RESEND RESTRICTION] Recipient {recipient_email} restricted by onboarding@resend.dev.", flush=True)
+        return False, "RESEND_TEST_DOMAIN_RESTRICTION"
     subject = 'Smart Banking Security Verification Code'
     plain_text = f"""Dear Customer,
 
@@ -412,7 +417,14 @@ If you did not initiate this transaction, please log in to your account and chan
 <p>This code is valid for exactly <strong>5 minutes</strong>. Do NOT share this code with anyone, including bank representatives.</p>
 <p>If you did not initiate this transaction, please log in to your account and change your password immediately.</p>
 """
-    return send_email(recipient_email, subject, plain_text, html_body)
+    try:
+        res = send_email(recipient_email, subject, plain_text, html_body)
+        if isinstance(res, tuple):
+            return res
+        return res
+    except Exception as e:
+        print(f"[WARN] send_otp_email exception safely handled: {e}", flush=True)
+        return False
 
 MODEL_PATH = str(BASE_DIR / 'banking_app_rf.pkl')
 METRICS_PATH = str(BASE_DIR / 'model_metrics.json')
@@ -425,29 +437,30 @@ face_recognizer = None
 
 
 def send_deposit_email(recipient_email, reference_id, amount, balance_before, balance_after, payment_id=None):
-    customer_name = "Valued Customer"
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT FIRSTNAME, LASTNAME FROM NEWBANK WHERE EMAIL = %s", (recipient_email,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            customer_name = f"{row['FIRSTNAME']} {row['LASTNAME']}"
-    except Exception:
-        pass
+        customer_name = "Valued Customer"
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT FIRSTNAME, LASTNAME FROM NEWBANK WHERE EMAIL = %s", (recipient_email,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                customer_name = f"{row['FIRSTNAME']} {row['LASTNAME']}"
+        except Exception:
+            pass
 
-    subject = "Smart Banking - Payment Successful" if payment_id else "Deposit Successful"
-    dt_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    pay_ref_plain = f"\nPayment Reference: {payment_id}" if payment_id else ""
-    pay_ref_html = f"""
+        subject = "Smart Banking - Payment Successful" if payment_id else "Deposit Successful"
+        dt_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        pay_ref_plain = f"\nPayment Reference: {payment_id}" if payment_id else ""
+        pay_ref_html = f"""
   <div class="details-row">
     <span class="details-label">Payment Reference:</span>
     <span class="details-value">{payment_id}</span>
   </div>""" if payment_id else ""
 
-    plain_text = f"""Dear {customer_name},
+        plain_text = f"""Dear {customer_name},
 
 Your account has been credited successfully.
 
@@ -460,7 +473,7 @@ Updated Balance: ₹{balance_after:,.2f}
 
 Thank you for banking with Smart Banking."""
 
-    html_body = build_html_email(f"""<p>Dear {customer_name},</p>
+        html_body = build_html_email(f"""<p>Dear {customer_name},</p>
 <p>Your account has been credited successfully.</p>
 <div class="details-box">
   <div class="details-row">
@@ -486,8 +499,11 @@ Thank you for banking with Smart Banking."""
 </div>
 <p>Thank you for banking with Smart Banking.</p>""")
 
-    dispatch_email_async(recipient_email, subject, plain_text, html_body)
-    return True
+        dispatch_email_async(recipient_email, subject, plain_text, html_body)
+        return True
+    except Exception as e:
+        print(f"[WARN] send_deposit_email error safely handled: {e}", flush=True)
+        return False
 def load_ml_model():
     global model
     if os.path.exists(MODEL_PATH):
@@ -676,6 +692,56 @@ def run_razorpay_migrations(cursor, is_postgres):
             cursor.execute(f"ALTER TABLE deposits ADD COLUMN {col} {col_type}")
         except Exception:
             pass
+
+def run_fraud_feedback_migrations(cursor, is_postgres):
+    if is_postgres:
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fraud_feedback (
+            id SERIAL PRIMARY KEY,
+            transaction_id INTEGER,
+            transaction_token VARCHAR(100),
+            admin_user_id INTEGER NOT NULL REFERENCES NEWBANK(ID) ON DELETE CASCADE,
+            admin_username VARCHAR(100),
+            sender VARCHAR(100),
+            receiver VARCHAR(100),
+            amount DOUBLE PRECISION,
+            ttype VARCHAR(50),
+            label VARCHAR(30) NOT NULL,
+            risk_score INTEGER,
+            risk_level VARCHAR(20),
+            ml_probability DOUBLE PRECISION,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+    else:
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fraud_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER,
+            transaction_token TEXT,
+            admin_user_id INTEGER NOT NULL,
+            admin_username TEXT,
+            sender TEXT,
+            receiver TEXT,
+            amount REAL,
+            ttype TEXT,
+            label TEXT NOT NULL,
+            risk_score INTEGER,
+            risk_level TEXT,
+            ml_probability REAL,
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(admin_user_id) REFERENCES NEWBANK(ID)
+        )
+        ''')
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_sender ON NEWT(SENDER)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_receiver ON NEWT(RECEIVER)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_newt_timestamp ON NEWT(TIMESTAMP)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fraud_feedback_token ON fraud_feedback(transaction_token)")
+    except Exception:
+        pass
 
 def init_db():
     conn = get_db_connection()
@@ -2195,23 +2261,95 @@ def biometric_verify_check():
         ''', (user_id, result_str, similarity, threshold, challenge, meta['path'], meta['hash'], meta['width'], meta['height']))
         
         if is_match:
-            # Mark verified in pending transaction
-            token = session.get('mfa_pending_token')
+            # Mark face_verified in pending transaction
+            token = session.get('mfa_pending_token') or (data.get('transaction_token') if data else None)
             if token:
                 cursor.execute("UPDATE pending_transactions SET face_verified = 1 WHERE token = %s", (token,))
                 
-            # Check OTP
-            otp_already_verified = False
+            # Check if transaction can be finalized now
+            should_finalize = False
             if token:
-                cursor.execute("SELECT otp_verified FROM pending_transactions WHERE token = %s", (token,))
+                cursor.execute("SELECT otp_verified, face_verified, risk_level, status, decision_trace, amount FROM pending_transactions WHERE token = %s", (token,))
                 ptx = cursor.fetchone()
-                if ptx and ptx['otp_verified']:
-                    otp_already_verified = True
+                if ptx:
+                    trace = {}
+                    try:
+                        trace = json.loads(ptx['decision_trace'] or '{}')
+                    except:
+                        pass
+                    
+                    is_biometric_fallback = bool(trace.get('biometric_fallback'))
+                    is_high_val = (ptx['amount'] > 20000.0)
+                    
+                    if ptx['status'] == 'PENDING':
+                        if is_biometric_fallback and ptx['face_verified']:
+                            should_finalize = True
+                        elif ptx['otp_verified'] and ptx['face_verified']:
+                            should_finalize = True
+                        elif ptx['otp_verified'] and not is_high_val and ptx['risk_level'] != 'HIGH':
+                            should_finalize = True
+
+            # Also check if there is a pending Razorpay deposit > ₹20,000 for this user
+            cursor.execute('''
+            SELECT * FROM deposits 
+            WHERE user_id = %s AND status = 'PENDING_BIOMETRIC' 
+            ORDER BY timestamp DESC LIMIT 1
+            ''', (user_id,))
+            pending_dep = cursor.fetchone()
             
+            if pending_dep:
+                dep_id = pending_dep['id']
+                dep_amount = pending_dep['amount']
+                dep_ref = pending_dep['reference_id']
+                pay_id = pending_dep['razorpay_payment_id']
+                
+                cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE ID = %s", (user_id,))
+                user_row = cursor.fetchone()
+                cur_bal = user_row['BAL'] if user_row else 0.0
+                u_email = user_row['EMAIL'] if user_row else ""
+                n_bal = cur_bal + dep_amount
+                
+                cursor.execute("UPDATE NEWBANK SET BAL = %s WHERE ID = %s", (n_bal, user_id))
+                
+                cursor.execute('''
+                UPDATE deposits 
+                SET status = 'APPROVED', 
+                    balance_before = %s, 
+                    balance_after = %s, 
+                    remarks = 'Razorpay Payment Verified & Biometric Approved'
+                WHERE id = %s
+                ''', (cur_bal, n_bal, dep_id))
+                
+                cursor.execute('''
+                INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, IS_FRAUD_PREDICTED, DECISION_TRACE)
+                VALUES (%s, 'Wallet', 'ADD_MONEY', %s, %s, %s, 0.0, 0.0, 'APPROVED', 0, %s)
+                ''', (session['username'], dep_amount, cur_bal, n_bal, json.dumps({"gateway": "Razorpay Test Mode", "payment_id": pay_id, "biometric_verified": True})))
+                
+                cursor.execute('''
+                INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+                VALUES (%s, 'WALLET_DEPOSIT_BIOMETRIC_SUCCESS', 'LOW', %s)
+                ''', (user_id, f"High value deposit INR {dep_amount} authorized via Biometric Face Verification."))
+                
+                conn.commit()
+                conn.close()
+                
+                if u_email:
+                    try:
+                        send_deposit_email(u_email, dep_ref, dep_amount, cur_bal, n_bal, payment_id=pay_id)
+                    except Exception as e_mail:
+                        print(f"[WARN] Deposit email notification failed: {e_mail}", flush=True)
+
+                return jsonify({
+                    "status": "success",
+                    "message": "Biometric face verification passed! Smart Wallet credited successfully.",
+                    "new_balance": n_bal,
+                    "reference_id": dep_ref
+                })
+
             conn.commit()
             conn.close()
             
-            if otp_already_verified:
+            if should_finalize and token:
                 return finalize_pending_transaction(token)
                 
             return jsonify({
@@ -2330,8 +2468,8 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
     risk_score = 10
     reasons = []
     
-    amount_points = 0
     # 1. Rule-Based checks: Amount
+    amount_points = 0
     if amount <= 10000:
         amount_points = 5
         risk_score += 5
@@ -2357,25 +2495,26 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
     sender_bal = sender_bal_row['BAL'] if sender_bal_row else 0.0
     
     empty_account_points = 0
-    if sender_bal > 0 and (amount / sender_bal) > 0.85:
+    if ttype != 'ADD_MONEY' and sender_bal > 0 and (amount / sender_bal) > 0.85:
         empty_account_points = 25
         risk_score += 25
         reasons.append("Account Emptying Anomaly (Transferring >85% of liquid balance)")
         
-    # Check if beneficiary is a new recipient
-    cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND RECEIVER = %s AND STATUS = 'APPROVED'", (sender_username, receiver))
-    recipient_history = cursor.fetchone()[0]
+    # Check if beneficiary is a new recipient / beneficiary risk
     new_recipient_points = 0
-    if recipient_history == 0:
-        new_recipient_points = 15
-        risk_score += 15
-        reasons.append("New Unverified Beneficiary Target")
+    if ttype not in ['ADD_MONEY', 'CASH_OUT'] and receiver not in ['Wallet', 'ATM_01'] and not str(receiver).startswith('ATM_'):
+        cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND RECEIVER = %s AND STATUS = 'APPROVED'", (sender_username, receiver))
+        recipient_history = cursor.fetchone()[0]
+        if recipient_history == 0:
+            new_recipient_points = 15
+            risk_score += 15
+            reasons.append("New Unverified Beneficiary Target")
         
-    # 2. Supervised ML prediction: Random Forest Model
+    # 2. Supervised ML prediction: Random Forest Model (Genuinely Continuous Probability Calibration)
     is_fraud_predicted = 0
     ml_model_points = 0
     ml_probability = 0.0
-    if model is not None:
+    if model is not None and ttype in ['TRANSFER', 'CASH_OUT', 'QR_PAYMENT']:
         cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = %s", (receiver,))
         receiver_bal_row = cursor.fetchone()
         receiver_bal = receiver_bal_row['BAL'] if receiver_bal_row else 0.0
@@ -2392,45 +2531,86 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
             pred = model.predict(df_pred)[0]
             is_fraud_predicted = int(pred)
             
-            # Exact prediction probability
             probs = model.predict_proba(df_pred)[0]
             ml_probability = float(probs[1])
             
-            if is_fraud_predicted == 1:
-                ml_model_points = 50
-                risk_score += 50
-                reasons.append("Random Forest Flag: Matches synthetic PaySim fraud profile splits")
-        except:
-            pass
+            # Genuinely continuous & bounded scoring: min(50, round(p * 50))
+            ml_model_points = min(50, max(0, int(round(ml_probability * 50))))
+            risk_score += ml_model_points
             
-    # 3. Behavior Velocity: Transaction count inside 5 minutes
-    cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND TIMESTAMP >= datetime('now', '-5 minutes')", (sender_username,))
-    recent_transfers = cursor.fetchone()[0]
+            if is_fraud_predicted == 1 or ml_probability >= 0.50:
+                reasons.append(f"Random Forest ML Flag: {ml_probability*100:.1f}% estimated fraud probability (+{ml_model_points} pts)")
+            elif ml_probability > 0.05:
+                reasons.append(f"Random Forest ML Signal: {ml_probability*100:.1f}% estimated fraud probability (+{ml_model_points} pts)")
+        except Exception:
+            pass
+
+    # 3. Behavioral Anomaly Detection
+    behavioral_points = 0
+    try:
+        cursor.execute('''
+        SELECT AMOUNT, TIMESTAMP FROM NEWT 
+        WHERE SENDER = %s AND STATUS = 'APPROVED' 
+        ORDER BY ID DESC LIMIT 50
+        ''', (sender_username,))
+        history_rows = cursor.fetchall()
+        
+        if len(history_rows) >= 3:
+            past_amounts = [float(r['AMOUNT']) for r in history_rows]
+            mean_amt = float(np.mean(past_amounts)) if len(past_amounts) > 0 else 0.0
+            std_amt = float(np.std(past_amounts)) if len(past_amounts) > 0 else 0.0
+            max_past_amt = float(max(past_amounts)) if len(past_amounts) > 0 else 0.0
+            
+            if std_amt > 0 and amount > (mean_amt + 3.0 * std_amt) and amount > (max_past_amt * 1.5):
+                b_pts = 15
+                reasons.append(f"Behavioral Anomaly: Amount INR {amount:,.2f} significantly exceeds historical average (INR {mean_amt:,.2f})")
+                behavioral_points += b_pts
+                risk_score += b_pts
+            elif std_amt > 0 and amount > (mean_amt + 2.0 * std_amt) and amount > (max_past_amt * 1.2):
+                b_pts = 10
+                reasons.append(f"Behavioral Deviation: Amount INR {amount:,.2f} higher than typical customer range (INR {mean_amt:,.2f})")
+                behavioral_points += b_pts
+                risk_score += b_pts
+        else:
+            reasons.append("Neutral profile: Insufficient transaction history for behavioral profiling")
+    except Exception:
+        pass
+
+    # 4. Enhanced Behavior Velocity: Transaction count inside 5 & 30 minutes
     velocity_points = 0
-    if recent_transfers >= 3:
-        velocity_points = 25
-        risk_score += 25
-        reasons.append("Velocity Anomaly: Extreme transactional frequency (>= 3 in 5 min)")
-    elif recent_transfers > 0:
-        velocity_points = 10
-        risk_score += 10
-        reasons.append("Rapid Velocity: Multiple transfers in last 5 minutes")
+    try:
+        cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND TIMESTAMP >= datetime('now', '-5 minutes')", (sender_username,))
+        recent_transfers = cursor.fetchone()[0]
         
-    # 4. Biometric signals: Failures in last 15 minutes
-    cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result != 'SUCCESS' AND attempted_at >= datetime('now', '-15 minutes')", (sender_id,))
-    recent_biometric_fails = cursor.fetchone()[0]
+        if recent_transfers >= 3:
+            velocity_points = 25
+            risk_score += 25
+            reasons.append("Velocity Anomaly: Extreme transactional frequency (>= 3 in 5 min)")
+        elif recent_transfers > 0:
+            velocity_points = 10
+            risk_score += 10
+            reasons.append("Rapid Velocity: Multiple transfers in last 5 minutes")
+    except Exception:
+        pass
+
+    # 5. Biometric signals: Failures in last 15 minutes
     biometric_points = 0
-    if recent_biometric_fails > 0:
-        biometric_points = 25 * recent_biometric_fails
-        risk_score += biometric_points
-        reasons.append(f"Biometric Failure Warning: {recent_biometric_fails} failed face/liveness attempts recently")
-        
+    try:
+        cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result != 'SUCCESS' AND attempted_at >= datetime('now', '-15 minutes')", (sender_id,))
+        recent_biometric_fails = cursor.fetchone()[0]
+        if recent_biometric_fails > 0:
+            biometric_points = 25 * recent_biometric_fails
+            risk_score += biometric_points
+            reasons.append(f"Biometric Failure Warning: {recent_biometric_fails} failed face/liveness attempts recently")
+    except Exception:
+        pass
+
     conn.close()
-    
+
     # Cap risk score at 100
-    risk_score = min(100, risk_score)
-    
-    # Determine risk level
+    risk_score = min(100, max(0, risk_score))
+
+    # Determine risk level based on thresholds
     if risk_score < 45:
         risk_level = 'LOW'
     elif 45 <= risk_score < 70:
@@ -2439,17 +2619,18 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
         risk_level = 'HIGH'
     else:
         risk_level = 'CRITICAL'
-        
+
     breakdown = {
         "base_points": 10,
         "amount_points": amount_points,
         "empty_account_points": empty_account_points,
         "new_recipient_points": new_recipient_points,
         "ml_model_points": ml_model_points,
+        "behavioral_points": behavioral_points,
         "velocity_points": velocity_points,
         "biometric_points": biometric_points
     }
-    
+
     return risk_score, risk_level, reasons, is_fraud_predicted, breakdown, ml_probability
 
 # --- Transaction API endpoints ---
@@ -2665,7 +2846,12 @@ def transfer_initiate():
         cursor.execute("SELECT id FROM face_enrollments WHERE user_id = %s", (sender_id,))
         has_face_enrolled = (cursor.fetchone() is not None)
 
-        # Enforce enrollment requirement for HIGH risk
+        is_high_value = (amount > 20000.0)
+
+        # High value (> ₹20,000) transactions require face verification
+        is_high_value = (amount > 20000.0)
+
+        # Enforce enrollment requirement for HIGH risk transactions
         if risk_level == 'HIGH' and not has_face_enrolled:
             conn.close()
             print("END /api/transfer/initiate", flush=True)
@@ -2679,8 +2865,20 @@ def transfer_initiate():
         token = secrets.token_urlsafe(32)
         expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # LOW RISK: Auto approve
-        if risk_level == 'LOW':
+        # Velocity Security Floor Check (>=3 transfers in 5 mins forces minimum MEDIUM / OTP challenge)
+        velocity_points = breakdown.get('velocity_points', 0)
+        is_velocity_escalated = (velocity_points >= 25)
+        
+        if is_velocity_escalated and risk_level == 'LOW':
+            reasons.append("Velocity Security Escalation: Extreme transaction frequency (>= 3 in 5 min) enforces OTP verification security floor.")
+            effective_risk_level = 'MEDIUM'
+            decision_trace['velocity_floor_triggered'] = True
+            decision_trace['auth_required'] = ['otp']
+        else:
+            effective_risk_level = risk_level
+
+        # LOW RISK (without velocity escalation): Auto approve
+        if effective_risk_level == 'LOW':
             print(f"[DEBUG] [Step 12: Pending transaction creation started (LOW)]", flush=True)
             cursor.execute('''
             INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, otp_verified, face_verified, expires_at, decision_trace)
@@ -2775,27 +2973,16 @@ def transfer_initiate():
 
         t_mail = time.time()
         print(f"[DEBUG] [Step 9: SMTP email send started] To: {sender_email}", flush=True)
-        success = False
+        mail_ok, mail_reason = False, "UNKNOWN"
         try:
-            success = send_otp_email(sender_email, otp, amount, receiver)
+            res_mail = send_otp_email(sender_email, otp, amount, receiver)
+            if isinstance(res_mail, tuple):
+                mail_ok, mail_reason = res_mail
+            else:
+                mail_ok, mail_reason = bool(res_mail), ("SUCCESS" if res_mail else "UNKNOWN")
         except Exception as mail_err:
             print(f"[DEBUG] [SMTP email send failed] Error: {mail_err}", flush=True)
-            
-        if not success:
-            # Delete database records to prevent bypass
-            t_rollback = time.time()
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = %s", (token,))
-            cursor.execute("DELETE FROM pending_transactions WHERE token = %s", (token,))
-            conn.commit()
-            conn.close()
-            print(f"[DEBUG] [Database rollback cleanup completed] took {time.time() - t_rollback:.4f}s", flush=True)
-            print("END /api/transfer/initiate", flush=True)
-            print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
-            return jsonify({"status": "error", "message": "Unable to deliver the OTP email. Please try again."}), 500
-
-        print(f"[DEBUG] [Step 10: SMTP email send completed] took {time.time() - t_mail:.4f}s", flush=True)
+            mail_ok, mail_reason = False, "EXCEPTION"
 
         parts = sender_email.split('@')
         name = parts[0]
@@ -2806,8 +2993,72 @@ def transfer_initiate():
             masked_name = name[0] + '*'
         masked_email = f"{masked_name}@{domain}"
 
+        if not mail_ok:
+            if mail_reason == "RESEND_TEST_DOMAIN_RESTRICTION":
+                # DEMO-SAFE BIOMETRIC FALLBACK TRIGGERED!
+                trace = json.loads(decision_trace or '{}') if isinstance(decision_trace, str) else (decision_trace or {})
+                trace['biometric_fallback'] = 1
+                trace['fallback_reason'] = "RESEND_TEST_DOMAIN_RESTRICTION"
+
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                UPDATE pending_transactions 
+                SET decision_trace = %s
+                WHERE token = %s
+                ''', (json.dumps(trace), token))
+
+                log_metadata = {
+                    "amount": amount,
+                    "receiver": receiver,
+                    "reason": "RESEND_TEST_DOMAIN_RESTRICTION",
+                    "transaction_token": token
+                }
+                log_audit_event(sender_id, 'BIOMETRIC_FALLBACK_TRIGGERED', sender[0], request.remote_addr or '127.0.0.1', request.headers.get('User-Agent', ''), log_metadata, cursor=cursor)
+
+                cursor.execute('''
+                INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+                VALUES (%s, 'BIOMETRIC_FALLBACK_TRIGGERED', 'MEDIUM', %s)
+                ''', (sender_id, f"Demo Biometric Fallback activated for INR {amount} transfer due to Resend recipient test-domain restriction."))
+
+                conn.commit()
+                conn.close()
+
+                required_auths = ["face"]
+
+                print(f"[DEBUG] [Step 14: JSON response returned (BIOMETRIC_FALLBACK)]", flush=True)
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+                return jsonify({
+                    "status": "verification_required",
+                    "biometric_fallback": True,
+                    "fallback_reason": "RESEND_TEST_DOMAIN_RESTRICTION",
+                    "required": required_auths,
+                    "transaction_token": token,
+                    "masked_email": masked_email,
+                    "expires_in": 300,
+                    "score": risk_score,
+                    "level": risk_level,
+                    "reasons": reasons,
+                    "message": "DEMO FALLBACK: Resend test-domain restriction active for recipient email. Biometric Face Verification required to authorize transaction."
+                }), 200
+            else:
+                t_rollback = time.time()
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM transaction_otp_challenges WHERE transaction_token = %s", (token,))
+                cursor.execute("DELETE FROM pending_transactions WHERE token = %s", (token,))
+                conn.commit()
+                conn.close()
+                print(f"[DEBUG] [Database rollback cleanup completed] took {time.time() - t_rollback:.4f}s", flush=True)
+                print("END /api/transfer/initiate", flush=True)
+                print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+                return jsonify({"status": "error", "message": "Unable to deliver the OTP email. Please try again."}), 500
+
+        print(f"[DEBUG] [Step 10: SMTP email send completed] took {time.time() - t_mail:.4f}s", flush=True)
+
         required_auths = ["otp"]
-        if risk_level == 'HIGH':
+        if risk_level == 'HIGH' or is_high_value:
             required_auths.append("face")
 
         print(f"[DEBUG] [Step 14: JSON response returned ({risk_level})]", flush=True)
@@ -3059,13 +3310,23 @@ def finalize_pending_transaction(token):
             conn.close()
             return jsonify({"status": "error", "message": "Transaction verification window has expired."}), 400
             
-        # Verification checks based on risk level
-        if not pending['otp_verified']:
+        # Parse decision_trace
+        trace = {}
+        try:
+            trace = json.loads(pending['decision_trace'] or '{}')
+        except:
+            pass
+
+        is_biometric_fallback = bool(trace.get('biometric_fallback'))
+
+        # 1. OTP Verification check (bypassed ONLY if biometric_fallback is active AND face_verified is 1)
+        if not pending['otp_verified'] and not (is_biometric_fallback and pending['face_verified']):
             cursor.execute("ROLLBACK")
             conn.close()
             return jsonify({"status": "error", "message": "OTP verification required."}), 400
-            
-        if pending['risk_level'] == 'HIGH' and not pending['face_verified']:
+
+        # 2. Face Verification check (required if HIGH risk or Biometric Fallback)
+        if (pending['risk_level'] == 'HIGH' or is_biometric_fallback) and not pending['face_verified']:
             cursor.execute("ROLLBACK")
             conn.close()
             return jsonify({"status": "error", "message": "Biometric face verification required."}), 400
@@ -3982,7 +4243,7 @@ def add_money_initiate():
                 risk_score = 75
                 reasons.append("Amount exceeds INR 50,000 (High Risk)")
         elif amount > 20000:
-            if risk_score < 40:
+            if risk_score >= 70 or risk_score < 45:
                 risk_score = 45
                 reasons.append("Amount exceeds INR 20,000 (Medium Risk)")
                 
@@ -3991,7 +4252,7 @@ def add_money_initiate():
             risk_level = 'CRITICAL'
         elif risk_score >= 70:
             risk_level = 'HIGH'
-        elif risk_score >= 40:
+        elif risk_score >= 45:
             risk_level = 'MEDIUM'
         else:
             risk_level = 'LOW'
@@ -6584,6 +6845,42 @@ def razorpay_verify_payment():
         # 5. Never accept amount from client — use server-side stored amount
         amount = dep['amount']
 
+        # 5b. High-Value Deposit Check (> ₹20,000)
+        if amount > 20000.0:
+            cursor.execute("SELECT id FROM face_enrollments WHERE user_id = %s", (user_id,))
+            if not cursor.fetchone():
+                conn.close()
+                return jsonify({
+                    "status": "error",
+                    "message": "Biometric face enrollment is required to credit wallet top-ups above ₹20,000. Please enroll your face first."
+                }), 400
+
+            cursor.execute('''
+            UPDATE deposits 
+            SET status = 'PENDING_BIOMETRIC', 
+                razorpay_payment_id = %s, 
+                remarks = 'Razorpay Verified — Pending Biometric Verification (> ₹20,000)'
+            WHERE id = %s
+            ''', (payment_id, dep['id']))
+
+            cursor.execute('''
+            INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
+            VALUES (%s, 'WALLET_DEPOSIT_PENDING_BIOMETRIC', 'LOW', %s)
+            ''', (user_id, f"Razorpay payment {payment_id} verified for INR {amount}. Biometric Face Verification required before wallet credit."))
+
+            conn.commit()
+            conn.close()
+
+            session['mfa_pending_token'] = f"DEP_BIO_{dep['id']}"
+
+            return jsonify({
+                "status": "biometric_required",
+                "biometric_required": True,
+                "reference_id": dep['reference_id'],
+                "amount": amount,
+                "message": "Razorpay payment verified successfully! Biometric Face Verification is required to credit wallet top-ups above ₹20,000."
+            }), 200
+
         # 6. Database Transaction: Credit wallet & insert ledger entry
         cursor.execute("SELECT BAL, EMAIL FROM NEWBANK WHERE ID = %s", (user_id,))
         user_row = cursor.fetchone()
@@ -6641,6 +6938,123 @@ def razorpay_verify_payment():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": f"Payment verification error: {str(e)}"}), 500
+
+
+
+# --- Admin Fraud Feedback Loop Endpoints ---
+
+@app.route('/api/admin/fraud-feedback', methods=['POST'])
+def admin_fraud_feedback():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized: Administrator access required."}), 403
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "Missing request payload."}), 400
+
+        token = data.get('transaction_token', '').strip()
+        label = data.get('label', '').strip().upper()
+        notes = data.get('notes', '').strip()
+
+        if label not in ['CONFIRMED_FRAUD', 'LEGITIMATE', 'UNCERTAIN']:
+            return jsonify({"status": "error", "message": "Invalid feedback label. Allowed: CONFIRMED_FRAUD, LEGITIMATE, UNCERTAIN."}), 400
+
+        admin_id = session['user_id']
+        admin_user = session['username']
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Fetch transaction details from pending_transactions or NEWT
+        cursor.execute("SELECT * FROM pending_transactions WHERE token = %s", (token,))
+        tx = cursor.fetchone()
+        
+        tx_id = None
+        sender = None
+        receiver = None
+        amount = None
+        ttype = None
+        risk_score = None
+        risk_level = None
+        ml_prob = None
+
+        if tx:
+            tx_id = tx['id']
+            sender = session.get('username', 'system')
+            receiver = tx['receiver']
+            amount = tx['amount']
+            ttype = tx['ttype']
+            risk_score = tx['risk_score']
+            risk_level = tx['risk_level']
+            try:
+                trace = json.loads(tx['decision_trace'] or '{}')
+                ml_prob = trace.get('ml_probability', 0.0)
+            except:
+                ml_prob = 0.0
+
+        cursor.execute('''
+        INSERT INTO fraud_feedback (transaction_id, transaction_token, admin_user_id, admin_username, sender, receiver, amount, ttype, label, risk_score, risk_level, ml_probability, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (tx_id, token, admin_id, admin_user, sender, receiver, amount, ttype, label, risk_score, risk_level, ml_prob, notes))
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "status": "success",
+            "message": f"Fraud feedback '{label}' submitted successfully for transaction."
+        }), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/admin/fraud-feedback/export', methods=['GET'])
+def admin_fraud_feedback_export():
+    if 'username' not in session or not session.get('is_admin', False):
+        return jsonify({"status": "error", "message": "Unauthorized: Administrator access required."}), 403
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT id, transaction_token, sender, receiver, amount, ttype, label, risk_score, risk_level, ml_probability, admin_username, created_at, notes
+        FROM fraud_feedback 
+        ORDER BY created_at DESC
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+
+        import io, csv
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "id", "transaction_token", "sender", "receiver", "amount", 
+            "ttype", "label", "risk_score", "risk_level", "ml_probability", 
+            "admin_username", "created_at", "notes"
+        ])
+
+        for r in rows:
+            writer.writerow([
+                r['id'], r['transaction_token'], r['sender'], r['receiver'], r['amount'],
+                r['ttype'], r['label'], r['risk_score'], r['risk_level'], r['ml_probability'],
+                r['admin_username'], r['created_at'], r['notes']
+            ])
+
+        csv_content = output.getvalue()
+        output.close()
+
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=fraud_feedback_dataset.csv"}
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == '__main__':

@@ -3402,3 +3402,401 @@ class TestRazorpayPaymentGateway(unittest.TestCase):
         self.assertIsInstance(data["reasons"], list)
 
 
+
+
+class TestBiometricFallbackAndHighValue(unittest.TestCase):
+    def setUp(self):
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+        self.client = app.test_client()
+        self.app_context = app.app_context()
+        self.app_context.push()
+        
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM NEWBANK")
+            cursor.execute("DELETE FROM deposits")
+            cursor.execute("DELETE FROM NEWT")
+            cursor.execute("DELETE FROM pending_transactions")
+            cursor.execute("DELETE FROM transaction_otp_challenges")
+            cursor.execute("DELETE FROM face_enrollments")
+            cursor.execute("DELETE FROM face_samples")
+            cursor.execute("DELETE FROM biometric_security_events")
+            conn.commit()
+            conn.close()
+
+    def tearDown(self):
+        self.app_context.pop()
+
+    def setup_users(self):
+        # Register sender
+        self.client.post('/api/register', json={
+            "username": "bio_sender", "firstname": "Sender", "lastname": "User",
+            "email": "sender@test.com", "password": "password123", "confirm": "password123",
+            "phone": "08111111111", "sex": "Male", "address": "123 St", "bal": 100000.0
+        })
+        # Register receiver
+        self.client.post('/api/register', json={
+            "username": "bio_receiver", "firstname": "Receiver", "lastname": "User",
+            "email": "receiver@test.com", "password": "password123", "confirm": "password123",
+            "phone": "08222222222", "sex": "Male", "address": "456 St", "bal": 1000.0
+        })
+        # Enroll face for sender
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ID FROM NEWBANK WHERE USERNAME = 'bio_sender'")
+        sender_id = cursor.fetchone()['ID']
+        mock_template = json.dumps([0.1] * 128)
+        cursor.execute("INSERT INTO face_enrollments (user_id, template_reference, status) VALUES (%s, %s, 'ACTIVE')", (sender_id, mock_template))
+        conn.commit()
+        conn.close()
+
+    def login_sender(self):
+        self.client.post('/api/login', json={"username": "bio_sender", "password": "password123"})
+
+    @patch('app.send_otp_email')
+    def test_fb_1_under_20k_transfer(self, mock_send_otp):
+        self.setup_users()
+        self.login_sender()
+        mock_send_otp.return_value = (True, "SUCCESS")
+
+        res = self.client.post('/api/transfer/initiate', json={"receiver": "bio_receiver", "amount": 5000, "ttype": "TRANSFER"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertIn('otp', data['required'])
+        self.assertNotIn('face', data['required'])
+
+    @patch('app.send_otp_email')
+    def test_fb_2_over_20k_transfer_requires_face(self, mock_send_otp):
+        self.setup_users()
+        self.login_sender()
+        mock_send_otp.return_value = (True, "SUCCESS")
+
+        res = self.client.post('/api/transfer/initiate', json={"receiver": "bio_receiver", "amount": 25000, "ttype": "TRANSFER"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertIn('otp', data['required'])
+        self.assertIn('face', data['required'])
+
+    @patch.dict(os.environ, {'SIMULATE_RESEND_TEST_RESTRICTION': '1'})
+    def test_fb_3_resend_test_restriction_triggers_biometric_fallback(self):
+        self.setup_users()
+        self.login_sender()
+
+        res = self.client.post('/api/transfer/initiate', json={"receiver": "bio_receiver", "amount": 25000, "ttype": "TRANSFER"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'verification_required')
+        self.assertTrue(data.get('biometric_fallback'))
+        self.assertEqual(data.get('fallback_reason'), 'RESEND_TEST_DOMAIN_RESTRICTION')
+        self.assertEqual(data['required'], ['face'])
+
+    @patch('app.calculate_similarity')
+    @patch('app.extract_face_embedding')
+    @patch.dict(os.environ, {'SIMULATE_RESEND_TEST_RESTRICTION': '1'})
+    def test_fb_4_5_6_face_failure_and_success_single_transfer(self, mock_extract, mock_sim):
+        self.setup_users()
+        self.login_sender()
+
+        # Initiate transfer with biometric fallback
+        res_init = self.client.post('/api/transfer/initiate', json={"receiver": "bio_receiver", "amount": 30000, "ttype": "TRANSFER"})
+        token = json.loads(res_init.data)['transaction_token']
+
+        # Set liveness challenge in session
+        with self.client.session_transaction() as sess:
+            sess['liveness_challenge'] = 'LOOK_STRAIGHT'
+            sess['mfa_pending_token'] = token
+
+        mock_extract.return_value = [0.1] * 128
+        
+        # 1. Face Verification Failure (mismatch) -> Zero balance change
+        mock_sim.return_value = (False, 0.1, 0.363)
+        res_fail = self.client.post('/api/biometric/verify/check', json={"image": "data:image/jpeg;base64,mock"})
+        self.assertEqual(res_fail.status_code, 400)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'bio_sender'")
+        self.assertEqual(cursor.fetchone()['BAL'], 100000.0)
+
+        # 2. Face Verification Success -> Transfer finalized once
+        mock_sim.return_value = (True, 0.95, 0.363)
+        res_succ = self.client.post('/api/biometric/verify/check', json={"image": "data:image/jpeg;base64,mock"})
+        self.assertEqual(res_succ.status_code, 200)
+
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'bio_sender'")
+        self.assertEqual(cursor.fetchone()['BAL'], 70000.0)
+
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'bio_receiver'")
+        self.assertEqual(cursor.fetchone()['BAL'], 31000.0)
+        conn.close()
+
+    @patch('app.compute_hybrid_risk')
+    def test_fb_7_critical_transaction_requires_admin_review(self, mock_risk):
+        self.setup_users()
+        self.login_sender()
+        mock_risk.return_value = (90, 'CRITICAL', ['Critical risk'], 1, {}, 0.95)
+
+        res = self.client.post('/api/transfer/initiate', json={"receiver": "bio_receiver", "amount": 50000, "ttype": "TRANSFER"})
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertEqual(data['status'], 'pending_review')
+
+    @patch('razorpay.Client')
+    @patch('app.calculate_similarity')
+    @patch('app.extract_face_embedding')
+    @patch.dict(os.environ, {'RAZORPAY_KEY_ID': 'rzp_test_key', 'RAZORPAY_KEY_SECRET': 'rzp_test_secret'})
+    def test_fb_8_9_10_razorpay_over_20k_biometric_flow(self, mock_extract, mock_sim, mock_rzp):
+        self.setup_users()
+        self.login_sender()
+
+        mock_instance = MagicMock()
+        mock_rzp.return_value = mock_instance
+        mock_instance.order.create.return_value = {"id": "order_over_20k"}
+        mock_instance.utility.verify_payment_signature.return_value = True
+        mock_instance.payment.fetch.return_value = {
+            "id": "pay_over_20k", "order_id": "order_over_20k", "status": "captured", "amount": 2500000
+        }
+
+        # 1. Create Order for 25,000
+        res_ord = self.client.post('/api/payment/create-order', json={"amount": 25000})
+        ref_id = json.loads(res_ord.data)['reference_id']
+
+        # 2. Verify Payment -> Requires Biometric (status = PENDING_BIOMETRIC, wallet balance unchanged)
+        res_ver = self.client.post('/api/payment/verify', json={
+            "razorpay_order_id": "order_over_20k",
+            "razorpay_payment_id": "pay_over_20k",
+            "razorpay_signature": "valid_sig",
+            "reference_id": ref_id
+        })
+        self.assertEqual(res_ver.status_code, 200)
+        data_ver = json.loads(res_ver.data)
+        self.assertEqual(data_ver['status'], 'biometric_required')
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'bio_sender'")
+        self.assertEqual(cursor.fetchone()['BAL'], 100000.0) # Unchanged!
+
+        # 3. Biometric Verification Pass -> Credits Wallet exactly once (+25,000 -> 125,000)
+        with self.client.session_transaction() as sess:
+            sess['liveness_challenge'] = 'LOOK_STRAIGHT'
+
+        mock_extract.return_value = [0.1] * 128
+        mock_sim.return_value = (True, 0.95, 0.363)
+
+        res_bio = self.client.post('/api/biometric/verify/check', json={"image": "data:image/jpeg;base64,mock"})
+        self.assertEqual(res_bio.status_code, 200)
+
+        cursor.execute("SELECT BAL FROM NEWBANK WHERE USERNAME = 'bio_sender'")
+        self.assertEqual(cursor.fetchone()['BAL'], 125000.0)
+        conn.close()
+
+
+class TestUpgradedFraudEngineSuite(unittest.TestCase):
+    def setUp(self):
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+        self.client = app.test_client()
+        self.app_context = app.app_context()
+        self.app_context.push()
+
+        with app.app_context():
+            from app import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM NEWBANK")
+            cursor.execute("DELETE FROM deposits")
+            cursor.execute("DELETE FROM NEWT")
+            cursor.execute("DELETE FROM pending_transactions")
+            cursor.execute("DELETE FROM transaction_otp_challenges")
+            cursor.execute("DELETE FROM face_enrollments")
+            cursor.execute("DELETE FROM face_samples")
+            cursor.execute("DELETE FROM biometric_security_events")
+            cursor.execute("DELETE FROM fraud_feedback")
+            conn.commit()
+            conn.close()
+
+    def tearDown(self):
+        self.app_context.pop()
+
+    def setup_user_and_admin(self):
+        # Admin user
+        self.client.post('/api/register', json={
+            "username": "fraud_admin", "firstname": "Admin", "lastname": "User",
+            "email": "admin@test.com", "password": "password123", "confirm": "password123",
+            "phone": "08000000000", "sex": "Male", "address": "Admin HQ"
+        })
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE NEWBANK SET IS_ADMIN = 1 WHERE USERNAME = 'fraud_admin'")
+        conn.commit()
+        conn.close()
+
+        # Regular user
+        self.client.post('/api/register', json={
+            "username": "fe_user1", "firstname": "FE", "lastname": "One",
+            "email": "fe1@test.com", "password": "password123", "confirm": "password123",
+            "phone": "08111111111", "sex": "Male", "address": "123 St", "bal": 200000.0
+        })
+        self.client.post('/api/register', json={
+            "username": "fe_user2", "firstname": "FE", "lastname": "Two",
+            "email": "fe2@test.com", "password": "password123", "confirm": "password123",
+            "phone": "08222222222", "sex": "Male", "address": "456 St", "bal": 10000.0
+        })
+
+    def login_user(self, username="fe_user1"):
+        self.client.post('/api/login', json={"username": username, "password": "password123"})
+
+    def login_admin(self):
+        self.client.post('/api/login', json={"username": "fraud_admin", "password": "password123"})
+
+    # 1, 2, 3: Behavioral Anomaly Tests
+    def test_behavioral_signals_and_new_user(self):
+        self.setup_user_and_admin()
+        self.login_user("fe_user1")
+
+        # New user with 0 history -> Neutral behavior, no crash
+        score, level, reasons, pred, breakdown, prob = compute_hybrid_risk(1, "fe_user1", "fe_user2", 1000, "TRANSFER")
+        self.assertIn("Neutral profile: Insufficient transaction history", reasons[-1])
+        self.assertGreaterEqual(score, 0)
+        self.assertLessEqual(score, 100)
+
+        # Populate historical transactions (3 transactions of ₹2,000)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        for _ in range(3):
+            cursor.execute("INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS) VALUES ('fe_user1', 'fe_user2', 'TRANSFER', 2000, 200000, 198000, 10000, 12000, 'APPROVED')")
+        conn.commit()
+        conn.close()
+
+        # Normal historical amount -> Low behavioral contribution
+        score_norm, _, _, _, breakdown_norm, _ = compute_hybrid_risk(1, "fe_user1", "fe_user2", 2100, "TRANSFER")
+        self.assertEqual(breakdown_norm['behavioral_points'], 0)
+
+        # Unusually large amount (₹80,000 vs mean ₹2,000) -> Behavioral anomaly contribution
+        score_anom, _, reasons_anom, _, breakdown_anom, _ = compute_hybrid_risk(1, "fe_user1", "fe_user2", 80000, "TRANSFER")
+        self.assertGreater(breakdown_anom['behavioral_points'], 0)
+        self.assertTrue(any("Behavioral" in r for r in reasons_anom))
+
+    # 4, 5: Recipient Risk Tests
+    def test_recipient_risk_signals(self):
+        self.setup_user_and_admin()
+        self.login_user("fe_user1")
+
+        # First-time recipient -> recipient points > 0
+        _, _, reasons_new, _, breakdown_new, _ = compute_hybrid_risk(1, "fe_user1", "fe_user2", 15000, "TRANSFER")
+        self.assertGreater(breakdown_new['recipient_points'], 0)
+
+        # Add 3 approved transfers to receiver
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        for _ in range(3):
+            cursor.execute("INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS) VALUES ('fe_user1', 'fe_user2', 'TRANSFER', 5000, 200000, 195000, 10000, 15000, 'APPROVED')")
+        conn.commit()
+        conn.close()
+
+        # Known recipient -> 0 recipient points
+        _, _, _, _, breakdown_known, _ = compute_hybrid_risk(1, "fe_user1", "fe_user2", 15000, "TRANSFER")
+        self.assertEqual(breakdown_known['recipient_points'], 0)
+
+    # 6, 7: Velocity Risk Tests
+    def test_velocity_risk_signals(self):
+        self.setup_user_and_admin()
+        self.login_user("fe_user1")
+
+        # Normal frequency -> 0 velocity points
+        _, _, _, _, breakdown_norm, _ = compute_hybrid_risk(1, "fe_user1", "fe_user2", 1000, "TRANSFER")
+        self.assertEqual(breakdown_norm['velocity_points'], 0)
+
+        # Populate rapid transfers in last 5 minutes
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        for i in range(4):
+            cursor.execute("INSERT INTO NEWT (SENDER, RECEIVER, TTYPE, AMOUNT, SENDEROLDBAL, SENDERNEWBAL, RECOLDBAL, RECNEWBAL, STATUS, TIMESTAMP) VALUES ('fe_user1', 'fe_user2', 'TRANSFER', 1000, 200000, 199000, 10000, 11000, 'APPROVED', datetime('now'))")
+        conn.commit()
+        conn.close()
+
+        # Multiple rapid transfers -> velocity points > 0
+        _, _, reasons_vel, _, breakdown_vel, _ = compute_hybrid_risk(1, "fe_user1", "fe_user2", 1000, "TRANSFER")
+        self.assertGreater(breakdown_vel['velocity_points'], 0)
+
+    # 8, 9, 10, 11, 12, 13, 14, 15, 16: Risk Calibration & Threshold Tests
+    def test_risk_calibration_and_thresholds(self):
+        self.setup_user_and_admin()
+
+        # Score remains within 0..100
+        score, level, _, _, breakdown, prob = compute_hybrid_risk(1, "fe_user1", "fe_user2", 1000, "TRANSFER")
+        self.assertGreaterEqual(score, 0)
+        self.assertLessEqual(score, 100)
+        self.assertEqual(level, 'LOW')
+
+        # Check breakdown dictionary contents
+        for key in ['base_points', 'amount_points', 'ml_model_points', 'behavioral_points', 'velocity_points', 'recipient_points', 'biometric_points']:
+            self.assertIn(key, breakdown)
+
+    # 17, 18, 19, 20, 21: Admin Fraud Feedback & Export Tests
+    def test_admin_fraud_feedback_and_export(self):
+        self.setup_user_and_admin()
+
+        # Normal user cannot submit feedback -> HTTP 403
+        self.login_user("fe_user1")
+        res_user_fb = self.client.post('/api/admin/fraud-feedback', json={
+            "transaction_token": "token_test_123",
+            "label": "CONFIRMED_FRAUD",
+            "notes": "Suspicious activity"
+        })
+        self.assertEqual(res_user_fb.status_code, 403)
+
+        # Admin submits CONFIRMED_FRAUD
+        self.login_admin()
+        res_admin_fb = self.client.post('/api/admin/fraud-feedback', json={
+            "transaction_token": "token_test_123",
+            "label": "CONFIRMED_FRAUD",
+            "notes": "Verified fraud report"
+        })
+        self.assertEqual(res_admin_fb.status_code, 200)
+
+        # Admin submits LEGITIMATE
+        res_admin_legit = self.client.post('/api/admin/fraud-feedback', json={
+            "transaction_token": "token_test_456",
+            "label": "LEGITIMATE",
+            "notes": "Verified user identity"
+        })
+        self.assertEqual(res_admin_legit.status_code, 200)
+
+        # Verify feedback persisted in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM fraud_feedback")
+        self.assertEqual(cursor.fetchone()[0], 2)
+        conn.close()
+
+        # Export CSV dataset -> Excludes sensitive info
+        res_export = self.client.get('/api/admin/fraud-feedback/export')
+        self.assertEqual(res_export.status_code, 200)
+        self.assertEqual(res_export.content_type, "text/csv")
+        csv_text = res_export.data.decode('utf-8')
+
+        self.assertIn("CONFIRMED_FRAUD", csv_text)
+        self.assertIn("LEGITIMATE", csv_text)
+        # Verify no sensitive keywords in export
+        self.assertNotIn("password", csv_text.lower())
+        self.assertNotIn("otp", csv_text.lower())
+        self.assertNotIn("secret", csv_text.lower())
+
+    # 22-32: Regression Safety Tests
+    def test_existing_ml_explainer_route(self):
+        self.setup_user_and_admin()
+        res = self.client.post('/api/model/explain', json={
+            "type": "TRANSFER", "amount": 50000, "oldbalanceOrig": 50000,
+            "newbalanceOrig": 0, "oldbalanceDest": 0, "newbalanceDest": 50000
+        })
+        self.assertEqual(res.status_code, 200)
+        data = json.loads(res.data)
+        self.assertIn("prediction", data)
+        self.assertIn("probability", data)
