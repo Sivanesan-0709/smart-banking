@@ -2702,7 +2702,9 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
     # 4. Enhanced Behavior Velocity: Transaction count inside 5 & 30 minutes
     velocity_points = 0
     try:
-        cursor.execute("SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND TIMESTAMP >= datetime('now', '-5 minutes')", (sender_username,))
+        is_pg = getattr(conn, '_is_postgres', False)
+        dt_5m = "CURRENT_TIMESTAMP - INTERVAL '5 minutes'" if is_pg else "datetime('now', '-5 minutes')"
+        cursor.execute(f"SELECT COUNT(*) FROM NEWT WHERE SENDER = %s AND TIMESTAMP >= {dt_5m}", (sender_username,))
         recent_transfers = cursor.fetchone()[0]
         
         if recent_transfers >= 3:
@@ -2719,7 +2721,8 @@ def compute_hybrid_risk(sender_id, sender_username, receiver, amount, ttype):
     # 5. Biometric signals: Failures in last 15 minutes
     biometric_points = 0
     try:
-        cursor.execute("SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result != 'SUCCESS' AND attempted_at >= datetime('now', '-15 minutes')", (sender_id,))
+        dt_15m = "CURRENT_TIMESTAMP - INTERVAL '15 minutes'" if is_pg else "datetime('now', '-15 minutes')"
+        cursor.execute(f"SELECT COUNT(*) FROM face_verification_attempts WHERE user_id = %s AND verification_result != 'SUCCESS' AND attempted_at >= {dt_15m}", (sender_id,))
         recent_biometric_fails = cursor.fetchone()[0]
         if recent_biometric_fails > 0:
             biometric_points = 25 * recent_biometric_fails
