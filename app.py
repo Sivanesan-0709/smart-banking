@@ -153,6 +153,79 @@ def is_valid_email(email):
     regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
     return bool(re.match(regex, email))
 
+def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
+    import urllib.request
+    import urllib.error
+    import json
+    import os
+
+    brevo_api_key = os.environ.get('BREVO_API_KEY')
+    if not brevo_api_key:
+        return False, "BREVO_API_KEY_NOT_SET"
+
+    sender_email = (
+        os.environ.get('BREVO_SENDER_EMAIL') or 
+        os.environ.get('SENDER_EMAIL') or 
+        os.environ.get('SMTP_FROM') or 
+        os.environ.get('SMTP_USERNAME') or 
+        os.environ.get('RESEND_FROM_EMAIL') or 
+        "no-reply@smartbanking.com"
+    )
+    sender_name = os.environ.get('BREVO_SENDER_NAME', 'Smart Banking')
+
+    print(f"[BREVO API] Starting delivery to {recipient_email}", flush=True)
+    print(f"[BREVO API] Recipient selected: {recipient_email}", flush=True)
+
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "api-key": brevo_api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Smart-Banking-Fraud-Detection/1.0"
+    }
+
+    payload = {
+        "sender": {
+            "name": sender_name,
+            "email": sender_email
+        },
+        "to": [
+            {
+                "email": recipient_email
+            }
+        ],
+        "subject": subject,
+        "textContent": plain_text
+    }
+    if html_body:
+        payload["htmlContent"] = html_body
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=10.0) as response:
+            status_code = response.getcode()
+            res_body = response.read().decode('utf-8')
+            print(f"[BREVO API] HTTP status={status_code}", flush=True)
+            print(f"[BREVO API] Delivery accepted for {recipient_email}", flush=True)
+            return True
+    except urllib.error.HTTPError as e:
+        err_content = ""
+        try:
+            err_content = e.read().decode('utf-8')
+        except Exception:
+            pass
+        print(f"[BREVO API] HTTP status={e.code} error={err_content[:200]}", flush=True)
+        return False, f"BREVO_HTTP_{e.code}"
+    except Exception as e:
+        print(f"[BREVO API] Exception during delivery: {type(e).__name__} - {e}", flush=True)
+        return False, f"BREVO_ERROR_{type(e).__name__}"
+
+
 def send_email_smtp(recipient_email, subject, plain_text, html_body=None):
     import smtplib
     from email.mime.text import MIMEText
@@ -246,21 +319,22 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
         print(f"[ERROR] Invalid recipient email format: {recipient_email}", flush=True)
         return False
         
+    brevo_api_key = os.environ.get('BREVO_API_KEY')
+    resend_api_key = os.environ.get('RESEND_API_KEY')
     smtp_host = os.environ.get('SMTP_HOST')
     smtp_user = os.environ.get('SMTP_USERNAME')
     smtp_pass = os.environ.get('SMTP_PASSWORD')
     
-    # Priority 1: Authenticated SMTP Delivery
-    if smtp_host and smtp_user and smtp_pass:
-        smtp_res = send_email_smtp(recipient_email, subject, plain_text, html_body)
-        if smtp_res is True:
+    # Priority 1: Brevo Transactional Email HTTP API (Primary Production Method)
+    if brevo_api_key:
+        brevo_res = send_email_brevo_api(recipient_email, subject, plain_text, html_body)
+        if brevo_res is True:
             return True
-        elif isinstance(smtp_res, tuple) and smtp_res[0] is True:
+        elif isinstance(brevo_res, tuple) and brevo_res[0] is True:
             return True
-        print(f"[WARN] Primary SMTP delivery failed ({smtp_res}). Evaluating fallbacks...", flush=True)
+        print(f"[WARN] Primary Brevo HTTP API delivery failed ({brevo_res}). Evaluating fallbacks...", flush=True)
 
-    # Priority 2: Resend API Delivery
-    resend_api_key = os.environ.get('RESEND_API_KEY')
+    # Priority 2: Resend HTTP API Delivery (Fallback)
     resend_from = os.environ.get('RESEND_FROM_EMAIL', 'onboarding@resend.dev')
     
     is_test = ('unittest' in sys.modules or os.environ.get('TESTING') == '1') and os.environ.get('TEST_PROD_SIMULATION') != '1'

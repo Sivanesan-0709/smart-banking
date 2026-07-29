@@ -2904,6 +2904,53 @@ class BankAppTestCase(unittest.TestCase):
             os.environ.pop('SMTP_USERNAME', None)
             os.environ.pop('SMTP_PASSWORD', None)
 
+
+    def test_brevo_api_delivery_success(self):
+        """Verify Brevo HTTP API delivery primary priority and payload structure."""
+        import app as app_module
+        import os
+        from unittest.mock import patch, MagicMock
+
+        os.environ['BREVO_API_KEY'] = 'test_brevo_key_123'
+        os.environ['BREVO_SENDER_EMAIL'] = 'sender@smartbank.com'
+
+        mock_resp = MagicMock()
+        mock_resp.getcode.return_value = 201
+        mock_resp.read.return_value = b'{"messageId":"<20260729.123@brevo.com>"}'
+
+        try:
+            with patch('urllib.request.urlopen', return_value=mock_resp) as mock_url:
+                res = app_module.send_email("brevo_rec@test.com", "Test Subject", "Test Text", "<p>Test HTML</p>")
+                self.assertTrue(res)
+                mock_url.assert_called_once()
+                req = mock_url.call_args[0][0]
+                self.assertEqual(req.full_url, "https://api.brevo.com/v3/smtp/email")
+                self.assertEqual(req.headers.get("Api-key"), "test_brevo_key_123")
+        finally:
+            os.environ.pop('BREVO_API_KEY', None)
+            os.environ.pop('BREVO_SENDER_EMAIL', None)
+
+    def test_brevo_api_delivery_failure_fallback(self):
+        """Verify Brevo HTTP API failure logs error safely and falls back cleanly."""
+        import app as app_module
+        import os, urllib.error
+        from unittest.mock import patch
+
+        os.environ['BREVO_API_KEY'] = 'invalid_key'
+
+        mock_http_err = urllib.error.HTTPError(
+            "https://api.brevo.com/v3/smtp/email", 401, "Unauthorized", {}, None
+        )
+        mock_http_err.read = lambda: b'{"code":"unauthorized","message":"Key not found"}'
+
+        try:
+            with patch('urllib.request.urlopen', side_effect=mock_http_err):
+                res = app_module.send_email("fallback_rec@test.com", "Test", "Text")
+                # Falls through to dev/test mock fallback cleanly
+                self.assertTrue(res)
+        finally:
+            os.environ.pop('BREVO_API_KEY', None)
+
 if __name__ == '__main__':
     unittest.main()
 
