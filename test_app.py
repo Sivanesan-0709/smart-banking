@@ -2790,6 +2790,120 @@ class BankAppTestCase(unittest.TestCase):
             if orig_render is not None:
                 os.environ['RENDER'] = orig_render
 
+
+    def test_dynamic_email_delivery_requirements_a_through_f(self):
+        """Verify dynamic registered email targeting, OTP server-side recipient protection, and SMTP error handling."""
+        import app as app_module
+        
+        captured_emails = []
+        original_send_email = app_module.send_email
+
+        def capture_send_email(recipient_email, subject, plain_text, html_body=None):
+            captured_emails.append({
+                "recipient": recipient_email,
+                "subject": subject,
+                "plain": plain_text
+            })
+            return True
+
+        app_module.send_email = capture_send_email
+
+        try:
+            # A. User A (Leena) registers with leena@gmail.com -> notification targets leena@gmail.com
+            res_a = self.register_user("leena_user", "leena@gmail.com", "Password123!", "Password123!", "9876543210")
+            self.assertEqual(res_a.status_code, 200)
+            self.assertTrue(len(captured_emails) >= 1)
+            self.assertEqual(captured_emails[-1]["recipient"], "leena@gmail.com")
+            self.assertIn("Smart Banking - Account Created Successfully", captured_emails[-1]["subject"])
+
+            # B. User B (Sivanesan) registers with siva@gmail.com -> notification targets siva@gmail.com
+            res_b = self.register_user("siva_user", "siva@gmail.com", "Password123!", "Password123!", "9876543211")
+            self.assertEqual(res_b.status_code, 200)
+            self.assertTrue(len(captured_emails) >= 2)
+            self.assertEqual(captured_emails[-1]["recipient"], "siva@gmail.com")
+            self.assertIn("Smart Banking - Account Created Successfully", captured_emails[-1]["subject"])
+
+            # Register recipient user for transfers
+            self.register_user("rec_user_ef", "rec_ef@gmail.com", "Password123!", "Password123!", "9876543212")
+
+            # C. User A (Leena) logs in and transaction requires OTP -> OTP targets leena@gmail.com
+            self.login_user("leena_user", "Password123!")
+            captured_emails.clear()
+            
+            # Send Medium Risk transfer (amount 15000 to new recipient -> score >= 45) to require OTP
+            res_tx_a = self.client.post('/api/transfer/initiate', json={
+                "receiver": "rec_user_ef",
+                "amount": 15000,
+                "ttype": "TRANSFER"
+            })
+            self.assertEqual(res_tx_a.status_code, 200)
+            self.assertTrue(len(captured_emails) >= 1)
+            self.assertEqual(captured_emails[0]["recipient"], "leena@gmail.com")
+            self.assertIn("Security Verification Code", captured_emails[0]["subject"])
+
+            # D. User B (Sivanesan) logs in and transaction requires OTP -> OTP targets siva@gmail.com
+            self.login_user("siva_user", "Password123!")
+            captured_emails.clear()
+
+            res_tx_b = self.client.post('/api/transfer/initiate', json={
+                "receiver": "rec_user_ef",
+                "amount": 15000,
+                "ttype": "TRANSFER"
+            })
+            self.assertEqual(res_tx_b.status_code, 200)
+            self.assertTrue(len(captured_emails) >= 1)
+            self.assertEqual(captured_emails[0]["recipient"], "siva@gmail.com")
+            self.assertIn("Security Verification Code", captured_emails[0]["subject"])
+
+            # E. Confirm recipient cannot be hijacked by passing malicious recipient_email parameter in API request
+            captured_emails.clear()
+            res_tx_hacker = self.client.post('/api/transfer/initiate', json={
+                "receiver": "rec_user_ef",
+                "amount": 15000,
+                "ttype": "TRANSFER",
+                "recipient_email": "attacker@hacker.com",
+                "email": "attacker@hacker.com"
+            })
+            self.assertEqual(res_tx_hacker.status_code, 200)
+            # Must STILL target User B's server-side registered email (siva@gmail.com), NOT attacker@hacker.com
+            self.assertEqual(captured_emails[0]["recipient"], "siva@gmail.com")
+
+        finally:
+            app_module.send_email = original_send_email
+
+    def test_smtp_failure_handling_safety(self):
+        """Verify that SMTP failure is handled safely without throwing unhandled exceptions."""
+        import app as app_module
+        
+        def fail_smtp(recipient_email, subject, plain_text, html_body=None):
+            return False, "SMTP_ERROR_ConnectionRefusedError"
+
+        original_send = app_module.send_email
+        app_module.send_email = fail_smtp
+
+        try:
+            # Registration failure should not crash registration or roll back account creation
+            res_reg = self.register_user("smtp_fail_u", "smtpfail@test.com", "Password123!", "Password123!", "9876543999")
+            self.assertEqual(res_reg.status_code, 200)
+
+            # Verification of send_email_smtp with invalid credentials returns error tuple safely
+            import os
+            os.environ['SMTP_HOST'] = '127.0.0.1'
+            os.environ['SMTP_PORT'] = '9999'
+            os.environ['SMTP_USERNAME'] = 'fake_user'
+            os.environ['SMTP_PASSWORD'] = 'fake_pass'
+            
+            res_smtp = app_module.send_email_smtp("test@test.com", "Test", "Text")
+            self.assertEqual(res_smtp[0], False)
+            self.assertTrue(str(res_smtp[1]).startswith("SMTP_ERROR_"))
+
+        finally:
+            app_module.send_email = original_send
+            os.environ.pop('SMTP_HOST', None)
+            os.environ.pop('SMTP_PORT', None)
+            os.environ.pop('SMTP_USERNAME', None)
+            os.environ.pop('SMTP_PASSWORD', None)
+
 if __name__ == '__main__':
     unittest.main()
 

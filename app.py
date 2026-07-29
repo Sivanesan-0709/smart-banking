@@ -153,6 +153,56 @@ def is_valid_email(email):
     regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
     return bool(re.match(regex, email))
 
+def send_email_smtp(recipient_email, subject, plain_text, html_body=None):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    
+    smtp_host = os.environ.get('SMTP_HOST')
+    smtp_port = int(os.environ.get('SMTP_PORT', 587))
+    smtp_user = os.environ.get('SMTP_USERNAME')
+    smtp_pass = os.environ.get('SMTP_PASSWORD')
+    smtp_from = os.environ.get('SMTP_FROM') or smtp_user or "no-reply@smartbanking.com"
+    
+    if not smtp_host or not smtp_user or not smtp_pass:
+        return False, "SMTP_NOT_CONFIGURED"
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = smtp_from
+    msg['To'] = recipient_email
+
+    part1 = MIMEText(plain_text, 'plain', 'utf-8')
+    msg.attach(part1)
+
+    if html_body:
+        part2 = MIMEText(html_body, 'html', 'utf-8')
+        msg.attach(part2)
+
+    try:
+        if smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_from, [recipient_email], msg.as_string())
+            server.quit()
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+            server.ehlo()
+            try:
+                server.starttls()
+                server.ehlo()
+            except Exception as e_tls:
+                print(f"[DEBUG] STARTTLS negotiation skipped: {e_tls}", flush=True)
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_from, [recipient_email], msg.as_string())
+            server.quit()
+        print(f"[INFO] Authenticated SMTP email successfully delivered to {recipient_email}.", flush=True)
+        return True
+    except Exception as e:
+        print(f"[ERROR] SMTP delivery failure to {recipient_email}: {type(e).__name__}", flush=True)
+        return False, f"SMTP_ERROR_{type(e).__name__}"
+
+
 def send_email(recipient_email, subject, plain_text, html_body=None):
     import urllib.request
     import urllib.error
@@ -164,59 +214,73 @@ def send_email(recipient_email, subject, plain_text, html_body=None):
         print(f"[ERROR] Invalid recipient email format: {recipient_email}", flush=True)
         return False
         
+    smtp_host = os.environ.get('SMTP_HOST')
+    smtp_user = os.environ.get('SMTP_USERNAME')
+    smtp_pass = os.environ.get('SMTP_PASSWORD')
+    
+    # Priority 1: Authenticated SMTP Delivery
+    if smtp_host and smtp_user and smtp_pass:
+        smtp_res = send_email_smtp(recipient_email, subject, plain_text, html_body)
+        if smtp_res is True:
+            return True
+        elif isinstance(smtp_res, tuple) and smtp_res[0] is True:
+            return True
+        print(f"[WARN] Primary SMTP delivery failed ({smtp_res}). Evaluating fallbacks...", flush=True)
+
+    # Priority 2: Resend API Delivery
     resend_api_key = os.environ.get('RESEND_API_KEY')
     resend_from = os.environ.get('RESEND_FROM_EMAIL', 'onboarding@resend.dev')
     
     is_test = ('unittest' in sys.modules or os.environ.get('TESTING') == '1') and os.environ.get('TEST_PROD_SIMULATION') != '1'
     is_dev = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEBUG') == '1' or not os.environ.get('RENDER')
     
-    # Fallback to local mock printing if Resend is not configured in test or dev mode
-    if not resend_api_key:
-        if is_test or is_dev:
-            print(f"[DEBUG] [MOCK EMAIL] To: {recipient_email} | Subject: {subject}", flush=True)
-            print(f"Plain Text:\n{plain_text}", flush=True)
-            if html_body:
-                print(f"HTML:\n{html_body[:200]}...", flush=True)
-            return True
-        else:
-            print("[ERROR] Resend API key is missing in production environment.", flush=True)
-            return False
+    if resend_api_key:
+        url = "https://api.resend.com/emails"
+        headers = {
+            "Authorization": f"Bearer {resend_api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Smart-Banking-Fraud-Detection/1.0"
+        }
+        payload = {
+            "from": resend_from,
+            "to": [recipient_email],
+            "subject": subject,
+            "text": plain_text
+        }
+        if html_body:
+            payload["html"] = html_body
+            
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers=headers,
+                method='POST'
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as response:
+                res_body = response.read().decode('utf-8')
+                print(f"[INFO] Resend email successfully delivered to {recipient_email}.", flush=True)
+                return True
+        except urllib.error.HTTPError as e:
+            err_content = e.read().decode('utf-8')
+            print(f"[ERROR] Resend HTTP Error {e.code} during email delivery: {err_content}", flush=True)
+            if e.code == 403 or "1010" in err_content or "validation_error" in err_content or "testing" in err_content.lower() or "domain" in err_content.lower():
+                return False, "RESEND_TEST_DOMAIN_RESTRICTION"
+            return False, f"HTTP_{e.code}"
+        except Exception as e:
+            print(f"[ERROR] Network/Connection failure during Resend email delivery: {e}", flush=True)
+            return False, "NETWORK_ERROR"
 
-    url = "https://api.resend.com/emails"
-    headers = {
-        "Authorization": f"Bearer {resend_api_key}",
-        "Content-Type": "application/json",
-        "User-Agent": "Smart-Banking-Fraud-Detection/1.0"
-    }
-    payload = {
-        "from": resend_from,
-        "to": [recipient_email],
-        "subject": subject,
-        "text": plain_text
-    }
-    if html_body:
-        payload["html"] = html_body
-        
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode('utf-8'),
-            headers=headers,
-            method='POST'
-        )
-        with urllib.request.urlopen(req, timeout=10.0) as response:
-            res_body = response.read().decode('utf-8')
-            print(f"[INFO] Resend email successfully delivered to {recipient_email}.", flush=True)
-            return True
-    except urllib.error.HTTPError as e:
-        err_content = e.read().decode('utf-8')
-        print(f"[ERROR] Resend HTTP Error {e.code} during email delivery: {err_content}", flush=True)
-        if e.code == 403 or "1010" in err_content or "validation_error" in err_content or "testing" in err_content.lower() or "domain" in err_content.lower():
-            return False, "RESEND_TEST_DOMAIN_RESTRICTION"
-        return False, f"HTTP_{e.code}"
-    except Exception as e:
-        print(f"[ERROR] Network/Connection failure during Resend email delivery: {e}", flush=True)
-        return False, "NETWORK_ERROR" 
+    # Priority 3: Development / Test Mode Mock Email Log
+    if is_test or is_dev:
+        print(f"[DEBUG] [MOCK EMAIL] To: {recipient_email} | Subject: {subject}", flush=True)
+        print(f"Plain Text:\n{plain_text}", flush=True)
+        if html_body:
+            print(f"HTML:\n{html_body[:200]}...", flush=True)
+        return True
+    else:
+        print("[ERROR] Neither SMTP nor Resend API key is configured in production environment.", flush=True)
+        return False
 
 def parse_datetime_safe(val):
     if val is None:
@@ -1608,7 +1672,7 @@ def register():
             user_id = user_row['ID'] if user_row else 0
             account_num = f"SB-1000{user_id}"
             
-            subject = "Welcome to Smart Banking"
+            subject = "Smart Banking - Account Created Successfully"
             reg_date = datetime.datetime.now().strftime("%Y-%m-%d")
             plain_text = f"Dear {firstname} {lastname},\n\nWelcome to Smart Banking.\n\nYour account has been created successfully.\n\nAccount Number:\n{account_num}\n\nRegistration Date:\n{reg_date}\n\nThank you for choosing Smart Banking."
             html_body = build_html_email(f"<p>Dear {firstname} {lastname},</p><p>Welcome to Smart Banking.</p><p>Your account has been created successfully.</p><div class='details-box'><div class='details-row'><span class='details-label'>Account Number:</span><span class='details-value'>{account_num}</span></div><div class='details-row'><span class='details-label'>Registration Date:</span><span class='details-value'>{reg_date}</span></div></div><p>Thank you for choosing Smart Banking.</p>")
