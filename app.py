@@ -164,6 +164,8 @@ def send_email_smtp(recipient_email, subject, plain_text, html_body=None):
     smtp_pass = os.environ.get('SMTP_PASSWORD')
     smtp_from = os.environ.get('SMTP_FROM') or smtp_user or "no-reply@smartbanking.com"
     
+    print(f"[DEBUG] [SMTP DIAGNOSTIC] Configured host={smtp_host} port={smtp_port} username_set={bool(smtp_user)} password_set={bool(smtp_pass)} from_set={bool(smtp_from)}", flush=True)
+
     if not smtp_host or not smtp_user or not smtp_pass:
         return False, "SMTP_NOT_CONFIGURED"
 
@@ -179,28 +181,58 @@ def send_email_smtp(recipient_email, subject, plain_text, html_body=None):
         part2 = MIMEText(html_body, 'html', 'utf-8')
         msg.attach(part2)
 
+    current_stage = "CONNECT"
     try:
         if smtp_port == 465:
+            current_stage = "CONNECT"
+            print(f"[DEBUG] [SMTP Stage: CONNECT] Opening SSL connection to {smtp_host}:{smtp_port}...", flush=True)
             server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+            print(f"[INFO] [SMTP Stage: CONNECT] SSL Connection established successfully.", flush=True)
+            
+            current_stage = "AUTHENTICATION"
+            print(f"[DEBUG] [SMTP Stage: AUTHENTICATION] Logging in as user (password_set={bool(smtp_pass)})...", flush=True)
             server.login(smtp_user, smtp_pass)
+            print(f"[INFO] [SMTP Stage: AUTHENTICATION] Authentication successful.", flush=True)
+            
+            current_stage = "SEND"
+            print(f"[DEBUG] [SMTP Stage: SEND] Sending email to {recipient_email}...", flush=True)
             server.sendmail(smtp_from, [recipient_email], msg.as_string())
+            print(f"[INFO] [SMTP Stage: SEND] Message accepted for delivery to {recipient_email}.", flush=True)
             server.quit()
         else:
+            current_stage = "CONNECT"
+            print(f"[DEBUG] [SMTP Stage: CONNECT] Opening connection to {smtp_host}:{smtp_port}...", flush=True)
             server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+            print(f"[INFO] [SMTP Stage: CONNECT] Connection established successfully.", flush=True)
             server.ehlo()
-            try:
-                server.starttls()
-                server.ehlo()
-            except Exception as e_tls:
-                print(f"[DEBUG] STARTTLS negotiation skipped: {e_tls}", flush=True)
+            
+            current_stage = "STARTTLS"
+            print(f"[DEBUG] [SMTP Stage: STARTTLS] Initiating STARTTLS TLS handshake...", flush=True)
+            server.starttls()
+            server.ehlo()
+            print(f"[INFO] [SMTP Stage: STARTTLS] TLS handshake completed successfully.", flush=True)
+            
+            current_stage = "AUTHENTICATION"
+            print(f"[DEBUG] [SMTP Stage: AUTHENTICATION] Logging in as user (password_set={bool(smtp_pass)})...", flush=True)
             server.login(smtp_user, smtp_pass)
+            print(f"[INFO] [SMTP Stage: AUTHENTICATION] Authentication successful.", flush=True)
+            
+            current_stage = "SEND"
+            print(f"[DEBUG] [SMTP Stage: SEND] Sending email to {recipient_email}...", flush=True)
             server.sendmail(smtp_from, [recipient_email], msg.as_string())
+            print(f"[INFO] [SMTP Stage: SEND] Message accepted for delivery to {recipient_email}.", flush=True)
             server.quit()
+            
         print(f"[INFO] Authenticated SMTP email successfully delivered to {recipient_email}.", flush=True)
         return True
     except Exception as e:
-        print(f"[ERROR] SMTP delivery failure to {recipient_email}: {type(e).__name__}", flush=True)
-        return False, f"SMTP_ERROR_{type(e).__name__}"
+        err_name = type(e).__name__
+        err_repr = repr(e)
+        err_str = str(e)
+        err_no = getattr(e, "errno", None)
+        print(f"[ERROR] SMTP stage={current_stage} type={err_name} repr={err_repr} errno={err_no} message={err_str}", flush=True)
+        return False, f"SMTP_ERROR_{err_name}"
+
 
 
 def send_email(recipient_email, subject, plain_text, html_body=None):
