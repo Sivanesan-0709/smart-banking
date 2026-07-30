@@ -173,8 +173,11 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
     )
     sender_name = os.environ.get('BREVO_SENDER_NAME', 'Smart Banking')
 
-    print(f"[BREVO API] Starting delivery to {recipient_email}", flush=True)
-    print(f"[BREVO API] Recipient selected: {recipient_email}", flush=True)
+    print(f"[BREVO DEBUG] BREVO_API_KEY present: {bool(brevo_api_key)}", flush=True)
+    print(f"[BREVO DEBUG] BREVO_SENDER_EMAIL value: {os.environ.get('BREVO_SENDER_EMAIL')}", flush=True)
+    print(f"[BREVO DEBUG] Actual sender email placed into JSON payload: {sender_email}", flush=True)
+    print(f"[BREVO DEBUG] Recipient email: {recipient_email}", flush=True)
+    print(f"[BREVO DEBUG] Subject: {subject}", flush=True)
 
     url = "https://api.brevo.com/v3/smtp/email"
     headers = {
@@ -210,7 +213,14 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
         with urllib.request.urlopen(req, timeout=10.0) as response:
             status_code = response.getcode()
             res_body = response.read().decode('utf-8')
-            print(f"[BREVO API] HTTP status={status_code}", flush=True)
+            print(f"[BREVO DEBUG] HTTP status={status_code}", flush=True)
+            try:
+                res_json = json.loads(res_body)
+                msg_id = res_json.get('messageId')
+                if msg_id:
+                    print(f"[BREVO DEBUG] messageId: {msg_id}", flush=True)
+            except Exception:
+                pass
             print(f"[BREVO API] Delivery accepted for {recipient_email}", flush=True)
             return True
     except urllib.error.HTTPError as e:

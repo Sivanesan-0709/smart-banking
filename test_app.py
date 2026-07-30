@@ -358,10 +358,10 @@ class BankAppTestCase(unittest.TestCase):
 
     def test_critical_risk_transaction(self):
         # Register alice and bob
-        self.register_user('alice', 'alice@test.com', 'pass123', 'pass123', '08111111111', bal=200000.0)
-        self.register_user('bob', 'bob@test.com', 'pass456', 'pass456', '08222222222', bal=2000.0)
+        self.register_user('alice', 'alice@test.com', 'Password123!', 'Password123!', '08111111111', bal=200000.0)
+        self.register_user('bob', 'bob@test.com', 'Password123!', 'Password123!', '08222222222', bal=2000.0)
         
-        self.login_user('alice', 'pass123')
+        self.login_user('alice', 'Password123!')
         
         # Initiate critical risk transfer (Amount: 180000 - triggers CRITICAL RISK because 10 (base) + 40 (amt) + 15 (new recipient) + 25 (empty account > 85%) = 90)
         res_init = self.client.post('/api/transfer/initiate', data=json.dumps({
@@ -2950,6 +2950,69 @@ class BankAppTestCase(unittest.TestCase):
                 self.assertTrue(res)
         finally:
             os.environ.pop('BREVO_API_KEY', None)
+
+
+    def test_postgresql_compatibility_suite(self):
+        """Verify that all analytics, dashboard, wallet, rate-limiting, and fraud queries execute cleanly under PostgreSQL translation."""
+        import app as app_module
+        from db_helper import CaseInsensitiveCursorWrapper
+        
+        # Test translation layer behavior on cursor wrapper
+        class DummyCursor:
+            def __init__(self):
+                self.last_query = None
+            def execute(self, query, params=None):
+                self.last_query = query
+                return None
+
+        dummy = DummyCursor()
+        wrapper = CaseInsensitiveCursorWrapper(dummy, is_postgres=True)
+
+        # 1. Date subtract interval translation check
+        wrapper.execute("SELECT SUM(amount) FROM deposits WHERE user_id = %s AND timestamp >= date('now', '-30 days')", (1,))
+        self.assertIn("CURRENT_TIMESTAMP - INTERVAL '30 days'", dummy.last_query)
+
+        wrapper.execute("SELECT COUNT(*) FROM login_attempts WHERE username = %s AND attempted_at >= datetime('now', '-5 minutes')", ("user1",))
+        self.assertIn("CURRENT_TIMESTAMP - INTERVAL '5 minutes'", dummy.last_query)
+
+        # 2. strftime / TO_CHAR translation check
+        wrapper.execute("SELECT strftime('%Y-%m-%d', timestamp) as day FROM deposits WHERE timestamp >= datetime('now', '-30 days')")
+        self.assertIn("TO_CHAR(timestamp, 'YYYY-MM-DD')", dummy.last_query)
+
+        # 3. IFNULL / COALESCE check
+        wrapper.execute("SELECT IFNULL(SUM(amount), 0) FROM deposits")
+        self.assertIn("COALESCE(", dummy.last_query)
+
+        # 4. Verify endpoints function without SQL syntax errors
+        self.register_user("pg_comp_user", "pg_comp@test.com", "Password123!", "Password123!", "9998887770")
+        self.login_user("pg_comp_user", "Password123!")
+
+        # User Analytics & Dashboard APIs
+        res_dash = self.client.get('/api/analytics/dashboard')
+        self.assertEqual(res_dash.status_code, 200)
+
+        res_ins = self.client.get('/api/analytics/insights')
+        self.assertEqual(res_ins.status_code, 200)
+
+        res_met = self.client.get('/api/dashboard/metrics')
+        self.assertEqual(res_met.status_code, 200)
+
+        res_wal_ana = self.client.get('/api/add-money/analytics')
+        self.assertEqual(res_wal_ana.status_code, 200)
+
+        res_txs = self.client.get('/api/transactions')
+        self.assertEqual(res_txs.status_code, 200)
+
+        # Admin Analytics APIs (with admin login)
+        self.login_user("admin", "adminpass")
+        res_adm_stats = self.client.get('/api/admin/stats')
+        self.assertEqual(res_adm_stats.status_code, 200)
+
+        res_adm_ana = self.client.get('/api/admin/analytics/stats')
+        self.assertEqual(res_adm_ana.status_code, 200)
+
+        res_adm_rev = self.client.get('/api/admin/reviews')
+        self.assertEqual(res_adm_rev.status_code, 200)
 
 if __name__ == '__main__':
     unittest.main()

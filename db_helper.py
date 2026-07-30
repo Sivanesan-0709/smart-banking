@@ -66,10 +66,33 @@ class CaseInsensitiveCursorWrapper:
             else:
                 return self._cursor.execute(query)
                 
-        # Adapt placeholders where absolutely necessary
+        # Adapt placeholders and SQLite date/time functions for PostgreSQL
         if self._is_postgres:
             if "?" in query:
                 query = query.replace("?", "%s")
+            
+            # Translate SQLite-specific date/time functions to native PostgreSQL equivalents
+            q_lower = query.lower()
+            if "date(" in q_lower or "datetime(" in q_lower or "strftime(" in q_lower or "ifnull(" in q_lower:
+                import re
+                query = re.sub(r"date\s*\(\s*'now'\s*,\s*'-30 days'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '30 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r'date\s*\(\s*"now"\s*,\s*"-30 days"\s*\)', "(CURRENT_TIMESTAMP - INTERVAL '30 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-30 days'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '30 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r'datetime\s*\(\s*"now"\s*,\s*"-30 days"\s*\)', "(CURRENT_TIMESTAMP - INTERVAL '30 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r"date\s*\(\s*'now'\s*,\s*'-60 days'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '60 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-60 days'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '60 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-7 days'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '7 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r"date\s*\(\s*'now'\s*,\s*'-7 days'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '7 days')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-1 day'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '1 day')", query, flags=re.IGNORECASE)
+                query = re.sub(r"date\s*\(\s*'now'\s*,\s*'-1 day'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '1 day')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-15 minutes'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '15 minutes')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-5 minutes'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '5 minutes')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'-10 seconds'\s*\)", "(CURRENT_TIMESTAMP - INTERVAL '10 seconds')", query, flags=re.IGNORECASE)
+                query = re.sub(r"datetime\s*\(\s*'now'\s*\)", "CURRENT_TIMESTAMP", query, flags=re.IGNORECASE)
+                query = re.sub(r"date\s*\(\s*'now'\s*\)", "CURRENT_DATE", query, flags=re.IGNORECASE)
+                query = re.sub(r"strftime\s*\(\s*'%Y-%m-%d'\s*,\s*([^)]+)\)", r"TO_CHAR(\g<1>, 'YYYY-MM-DD')", query, flags=re.IGNORECASE)
+                query = re.sub(r"strftime\s*\(\s*'%%Y-%%m-%%d'\s*,\s*([^)]+)\)", r"TO_CHAR(\g<1>, 'YYYY-MM-DD')", query, flags=re.IGNORECASE)
+                query = re.sub(r"ifnull\s*\(", "COALESCE(", query, flags=re.IGNORECASE)
         else:
             import re
             query = re.sub(r"(?<!['\"])%s(?!['\"])", "?", query)
@@ -82,7 +105,7 @@ class CaseInsensitiveCursorWrapper:
             return self._cursor.execute(query, parameters)
         else:
             return self._cursor.execute(query)
-            
+
     def fetchone(self):
         row = self._cursor.fetchone()
         if row is None:
@@ -126,6 +149,11 @@ class CaseInsensitiveConnectionWrapper:
         if self._is_postgres:
             global _pool
             if _pool:
+                try:
+                    if not getattr(self._conn, 'closed', False):
+                        self._conn.rollback()
+                except Exception:
+                    pass
                 try:
                     _pool.putconn(self._conn)
                 except Exception as e:
