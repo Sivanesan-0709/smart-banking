@@ -2591,6 +2591,8 @@ def biometric_verify_check():
                 })
 
             if token and ptx and ptx['status'] == 'PENDING_FACE_VERIFICATION':
+                print("[SECURITY] Face verification successful", flush=True)
+                print("[SECURITY] Generating OTP after biometric verification", flush=True)
                 # FEATURE 2 WORKFLOW: Face Verification Succeeded -> Generate & Send OTP NOW
                 otp = f"{secrets.randbelow(1000000):06d}"
                 otp_hashed = hash_otp(otp)
@@ -2618,6 +2620,7 @@ def biometric_verify_check():
                 conn.close()
 
                 mail_ok = send_otp_email(u_email, otp, p_amount, p_receiver)
+                print("[SECURITY] OTP sent", flush=True)
                 simulated_otp = None
                 sim_msg = None
                 if os.environ.get('EMAIL_SIMULATION_MODE') == '1' or not mail_ok:
@@ -3167,9 +3170,6 @@ def transfer_initiate():
 
         is_high_value = (amount > 20000.0)
 
-        # High value (> ₹20,000) transactions require face verification
-        is_high_value = (amount > 20000.0)
-
         # Enforce enrollment requirement for HIGH risk transactions
         if risk_level == 'HIGH' and not has_face_enrolled:
             conn.close()
@@ -3264,6 +3264,9 @@ def transfer_initiate():
 
         # HIGH RISK WORKFLOW FEATURE 2: Face Verification BEFORE OTP Generation
         if risk_level == 'HIGH':
+            print("[SECURITY] High-risk transaction detected", flush=True)
+            print("[SECURITY] Biometric verification required", flush=True)
+            print("[SECURITY] Launching face verification", flush=True)
             decision_trace['auth_required'] = ['face', 'otp']
             cursor.execute('''
             INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, status, decision_trace)

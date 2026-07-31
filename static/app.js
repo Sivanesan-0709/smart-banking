@@ -782,29 +782,60 @@ function startResendCooldown(durationSeconds) {
     resendCooldownInterval = setInterval(updateCooldown, 1000);
 }
 
-function openMfaModal(data) {
+function openMfaModal(dataOrToken, isFaceRequired = false) {
     document.getElementById('mfaModal').classList.remove('hidden');
-    document.getElementById('mfaStepOtp').classList.remove('hidden');
-    document.getElementById('mfaStepFace').classList.add('hidden');
     
-    sessionStorage.setItem('mfa_transaction_token', data.transaction_token);
-    sessionStorage.setItem('mfa_required', JSON.stringify(data.required));
+    let token = "";
+    let maskedEmail = "";
+    let faceFirst = false;
+    let expires = 300;
     
-    const emailSpan = document.getElementById('mfaMaskedEmail');
-    if (emailSpan) emailSpan.innerText = data.masked_email;
-    document.getElementById('mfaOtpCode').value = '';
-    document.getElementById('mfaOtpCode').focus();
-    
-    const submitBtn = document.getElementById('mfaSubmitOtpBtn');
-    if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = '<span>Confirm OTP</span> <i class="fa-solid fa-arrow-right"></i>';
+    if (typeof dataOrToken === 'object' && dataOrToken !== null) {
+        token = dataOrToken.transaction_token || dataOrToken.reference_id || "";
+        maskedEmail = dataOrToken.masked_email || "";
+        expires = dataOrToken.expires_in || 300;
+        
+        const req = dataOrToken.required || [];
+        faceFirst = (dataOrToken.current_step === 'face') || 
+                    (Array.isArray(req) && req.includes('face')) || 
+                    (dataOrToken.level === 'HIGH') || 
+                    !!dataOrToken.face_required;
+    } else {
+        token = dataOrToken || "";
+        faceFirst = !!isFaceRequired;
     }
     
+    sessionStorage.setItem('mfa_transaction_token', token);
     faceAttempts = 0;
     
-    startOtpTimer(data.expires_in || 300);
-    startResendCooldown(60);
+    if (faceFirst) {
+        console.log('[SECURITY] High-risk transaction detected');
+        console.log('[SECURITY] Biometric verification required');
+        console.log('[SECURITY] Launching face verification');
+        
+        document.getElementById('mfaStepOtp').classList.add('hidden');
+        document.getElementById('mfaStepFace').classList.remove('hidden');
+        
+        // Initialize challenge and launch camera automatically
+        initMfaVerificationChallenge(true);
+    } else {
+        document.getElementById('mfaStepOtp').classList.remove('hidden');
+        document.getElementById('mfaStepFace').classList.add('hidden');
+        
+        const emailSpan = document.getElementById('mfaMaskedEmail');
+        if (emailSpan && maskedEmail) emailSpan.innerText = maskedEmail;
+        document.getElementById('mfaOtpCode').value = '';
+        document.getElementById('mfaOtpCode').focus();
+        
+        const submitBtn = document.getElementById('mfaSubmitOtpBtn');
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<span>Confirm OTP</span> <i class="fa-solid fa-arrow-right"></i>';
+        }
+        
+        startOtpTimer(expires);
+        startResendCooldown(60);
+    }
 }
 
 function closeMfaModal() {
@@ -925,7 +956,7 @@ function handleMfaOtpResend() {
     });
 }
 
-function initMfaVerificationChallenge() {
+function initMfaVerificationChallenge(autoStartCamera = false) {
     document.getElementById('livenessInstructionText').innerText = 'Requesting Challenge...';
     document.getElementById('mfaFaceFeedback').innerText = '';
     
@@ -957,6 +988,10 @@ function initMfaVerificationChallenge() {
                 
                 document.getElementById('livenessInstructionText').innerText = challengeText;
                 document.getElementById('mfaFaceStartBtn').classList.remove('hidden');
+                
+                if (autoStartCamera) {
+                    initMfaWebcam();
+                }
             }
         });
 }
@@ -1021,28 +1056,54 @@ function captureMfaFrame() {
     
     document.getElementById('mfaFaceFeedback').innerText = `Matching face (Attempt ${faceAttempts}/${maxFaceAttempts})...`;
     
+    const transaction_token = sessionStorage.getItem('mfa_transaction_token');
+    
     fetch('/api/biometric/verify/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: dataUrl })
+        body: JSON.stringify({ image: dataUrl, transaction_token })
     })
     .then(async res => {
         const data = await res.json();
-        if (res.status === 200 && data.status === 'success') {
+        if (res.status === 200) {
+            if (data.status === 'success') {
+                stopMfaWebcam();
+                closeMfaModal();
+                showToast('Transfer Approved', data.message, 'success');
+                document.getElementById('transferForm').reset();
+                loadDashboardData();
+                
+                showDecisionTrace(
+                    data.new_balance, 
+                    sessionStorage.getItem('current_risk_level'),
+                    sessionStorage.getItem('current_risk_score'),
+                    JSON.parse(sessionStorage.getItem('current_reasons')),
+                    true, true, true
+                );
+            } else if (data.status === 'otp_required') {
+                console.log('[SECURITY] Face verification successful');
+                console.log('[SECURITY] Generating OTP after biometric verification');
+                console.log('[SECURITY] OTP sent');
+                stopMfaWebcam();
+                showToast('Face Verified', 'Face verification successful! OTP code sent to your email.', 'success');
+                document.getElementById('mfaStepFace').classList.add('hidden');
+                document.getElementById('mfaStepOtp').classList.remove('hidden');
+                const emailSpan = document.getElementById('mfaMaskedEmail');
+                if (emailSpan && data.masked_email) emailSpan.innerText = data.masked_email;
+                document.getElementById('mfaOtpCode').value = '';
+                document.getElementById('mfaOtpCode').focus();
+                if (data.simulated_otp) {
+                    showToast('Simulation OTP', data.simulation_message, 'info');
+                }
+                startOtpTimer(data.expires_in || 300);
+                startResendCooldown(60);
+            }
+        } else if (res.status === 400 && (data.status === 'blocked' || data.status === 'mismatch' || data.status === 'liveness_failed')) {
             stopMfaWebcam();
             closeMfaModal();
-            showToast('Transfer Approved', data.message, 'success');
+            showToast('Verification Failed', data.message || 'Face verification failed. Transaction blocked.', 'error');
             document.getElementById('transferForm').reset();
             loadDashboardData();
-            
-            // Show successful decision trace
-            showDecisionTrace(
-                data.new_balance, 
-                sessionStorage.getItem('current_risk_level'),
-                sessionStorage.getItem('current_risk_score'),
-                JSON.parse(sessionStorage.getItem('current_reasons')),
-                true, true, true
-            );
         } else {
             document.getElementById('mfaFaceFeedback').innerText = data.message || 'Verification mismatch.';
         }
