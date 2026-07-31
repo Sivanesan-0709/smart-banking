@@ -2388,9 +2388,8 @@ def biometric_verify_initiate():
     if 'username' not in session:
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
         
-    challenges = ['LOOK_LEFT', 'LOOK_RIGHT', 'LOOK_STRAIGHT']
-    challenge = random.choice(challenges)
-    
+    # Presentation Mode: Single step - Look Straight
+    challenge = 'LOOK_STRAIGHT'
     session['liveness_challenge'] = challenge
     return jsonify({"status": "success", "challenge": challenge})
 
@@ -2633,6 +2632,9 @@ def biometric_verify_check():
                     "transaction_token": token,
                     "similarity": round(similarity * 100, 2),
                     "threshold": threshold,
+                    "simulated_otp": otp,
+                    "demo_otp": otp,
+                    "simulation_message": f"Demo Mode: Your OTP is {otp}",
                     "progress": [
                         "Risk Analysis Complete",
                         "Face Verification Required",
@@ -2640,9 +2642,6 @@ def biometric_verify_check():
                         "OTP Generated"
                     ]
                 }
-                if simulated_otp:
-                    resp_data["simulated_otp"] = simulated_otp
-                    resp_data["simulation_message"] = sim_msg
 
                 return jsonify(resp_data), 200
 
