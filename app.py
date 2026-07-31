@@ -4624,6 +4624,8 @@ def add_money_initiate():
             risk_level = 'MEDIUM'
         else:
             risk_level = 'LOW'
+
+
             
         decision_trace = {
             "reasons": reasons,
@@ -4742,7 +4744,7 @@ def add_money_initiate():
                 "risk_level": risk_level,
                 "risk_score": risk_score,
                 "otp_required": True,
-                "face_required": (risk_level == 'HIGH')
+                "face_required": False
             })
             
         else: # CRITICAL
@@ -7212,21 +7214,21 @@ def razorpay_verify_payment():
         # 5. Never accept amount from client — use server-side stored amount
         amount = dep['amount']
 
-        # 5b. High-Value Deposit Check (> ₹20,000)
-        if amount > 20000.0:
+        # 5b. High-Value Deposit Check (> ₹2,00,000)
+        if amount > 200000.0:
             cursor.execute("SELECT id FROM face_enrollments WHERE user_id = %s", (user_id,))
             if not cursor.fetchone():
                 conn.close()
                 return jsonify({
                     "status": "error",
-                    "message": "Biometric face enrollment is required to credit wallet top-ups above ₹20,000. Please enroll your face first."
+                    "message": "Biometric face enrollment is required to credit wallet top-ups above ₹2,00,000. Please enroll your face first."
                 }), 400
 
             cursor.execute('''
             UPDATE deposits 
             SET status = 'PENDING_BIOMETRIC', 
                 razorpay_payment_id = %s, 
-                remarks = 'Razorpay Verified — Pending Biometric Verification (> ₹20,000)'
+                remarks = 'Razorpay Verified — Pending Biometric Verification (> ₹2,00,000)'
             WHERE id = %s
             ''', (payment_id, dep['id']))
 
@@ -7245,7 +7247,7 @@ def razorpay_verify_payment():
                 "biometric_required": True,
                 "reference_id": dep['reference_id'],
                 "amount": amount,
-                "message": "Razorpay payment verified successfully! Biometric Face Verification is required to credit wallet top-ups above ₹20,000."
+                "message": "Razorpay payment verified successfully! Biometric Face Verification is required to credit wallet top-ups above ₹2,00,000."
             }), 200
 
         # 6. Database Transaction: Credit wallet & insert ledger entry
