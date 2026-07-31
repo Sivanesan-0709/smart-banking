@@ -4556,8 +4556,8 @@ def add_money_initiate():
         gateway = data.get('gateway', '').strip()
         remarks = data.get('remarks', '').strip()
         
-        if amount < 100 or amount > 200000:
-            return jsonify({"status": "error", "message": "Transaction amount must be between INR 100 and INR 2,00,000."}), 400
+        if amount < 1 or amount > 200000:
+            return jsonify({"status": "error", "message": "Maximum wallet top-up limit is ₹2,00,000."}), 400
             
         if method not in ['UPI', 'Debit Card', 'Credit Card', 'Net Banking']:
             return jsonify({"status": "error", "message": "Invalid payment method."}), 400
@@ -7021,8 +7021,8 @@ def razorpay_create_order():
         if amount <= 0 or math.isnan(amount) or math.isinf(amount):
             return jsonify({"status": "error", "message": "Amount must be greater than zero."}), 400
             
-        if amount > 200000.0:
-            return jsonify({"status": "error", "message": "Maximum single transaction limit is ₹2,00,000."}), 400
+        if amount < 1 or amount > 200000.0:
+            return jsonify({"status": "error", "message": "Maximum wallet top-up limit is ₹2,00,000."}), 400
 
         # Convert INR to paise safely
         amount_paise = int(round(amount * 100))

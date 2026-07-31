@@ -847,7 +847,7 @@
             <div id="addMoneySetup">
                 <div class="input-group">
                     <label for="depositAmount">Amount (INR)</label>
-                    <input type="text" id="depositAmount" placeholder="Min ₹100, Max ₹2,00,000" required style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
+                    <input type="text" id="depositAmount" placeholder="Min ₹1, Max ₹2,00,000" required style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.1);">
                 </div>
                 
                 <div class="quick-add-grid" style="margin-top: 10px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 15px;">
@@ -858,6 +858,8 @@
                     <button class="btn btn-outline btn-sm" onclick="setDepositAmount(10000)">₹10000</button>
                     <button class="btn btn-outline btn-sm" onclick="setDepositAmount(20000)">₹20000</button>
                     <button class="btn btn-outline btn-sm" onclick="setDepositAmount(50000)">₹50000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(100000)">₹1,00,000</button>
+                    <button class="btn btn-outline btn-sm" onclick="setDepositAmount(200000)">₹2,00,000</button>
                 </div>
                 
                 <div class="input-group">

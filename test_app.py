@@ -1449,7 +1449,7 @@ class BankAppTestCase(unittest.TestCase):
         
         # Min limit
         res_min = self.client.post('/api/add-money/initiate', json={
-            "amount": 50.0, "method": "UPI", "gateway": "Google Pay"
+            "amount": 0.0, "method": "UPI", "gateway": "Google Pay"
         })
         self.assertEqual(res_min.status_code, 400)
         
@@ -2578,7 +2578,7 @@ class BankAppTestCase(unittest.TestCase):
         self.assertEqual(res_exceed.status_code, 400)
         data_exceed = json.loads(res_exceed.data)
         self.assertEqual(data_exceed['status'], 'error')
-        self.assertIn("INR 100 and INR 2,00,000", data_exceed['message'])
+        self.assertIn("2,00,000", data_exceed['message'])
 
         # Test Indian formatting parsing compatibility in the backend
         res_format = self.client.post('/api/add-money/initiate', json={

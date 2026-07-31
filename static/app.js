@@ -2083,8 +2083,8 @@ function startDepositVerification() {
     const gateway = document.getElementById('depositGateway').value;
     const remarks = document.getElementById('depositRemarks').value.trim();
     
-    if (isNaN(amount) || amount < 100 || amount > 200000) {
-        showToast('Invalid Amount', 'Transaction amount must be between ₹100 and ₹2,00,000.', 'error');
+    if (isNaN(amount) || amount < 1 || amount > 200000) {
+        showToast('Invalid Amount', 'Maximum wallet top-up limit is ₹2,00,000.', 'error');
         return;
     }
     
