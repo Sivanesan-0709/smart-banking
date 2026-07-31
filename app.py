@@ -3168,7 +3168,12 @@ def transfer_initiate():
         cursor.execute("SELECT id FROM face_enrollments WHERE user_id = %s", (sender_id,))
         has_face_enrolled = (cursor.fetchone() is not None)
 
-        is_high_value = (amount > 20000.0)
+        is_high_value = (amount >= 26000.0)
+        if (is_high_value and has_face_enrolled) or risk_level == 'HIGH':
+            risk_level = 'HIGH'
+            reasons.append("High-Value Transfer Threshold (≥ ₹26,000) enforces Mandatory Biometric Face Verification")
+            decision_trace['high_value_biometric_enforced'] = True
+            decision_trace['auth_required'] = ['face', 'otp']
 
         # Enforce enrollment requirement for HIGH risk transactions
         if risk_level == 'HIGH' and not has_face_enrolled:
