@@ -318,32 +318,32 @@ class BankAppTestCase(unittest.TestCase):
         data_init = json.loads(res_init.data)
         self.assertEqual(data_init['status'], 'verification_required')
         self.assertIn('face', data_init['required'])
-        self.assertIn('otp', data_init['required'])
         token = data_init['transaction_token']
+
+        # Feature 2 Workflow: Face verification FIRST
+        mock_liveness.return_value = True
+        mock_similarity.return_value = (True, 0.98, 0.363)
+        
+        self.client.post('/api/biometric/verify/initiate')
+        res_verify_face = self.client.post('/api/biometric/verify/check', data=json.dumps({
+            'image': 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP...',
+            'transaction_token': token
+        }), content_type='application/json')
+        self.assertEqual(res_verify_face.status_code, 200)
+        data_verify_face = json.loads(res_verify_face.data)
+        self.assertEqual(data_verify_face['status'], 'otp_required')
+
         self.assertTrue(len(self.captured_otps) > 0)
         otp = self.captured_otps[-1]
 
-        # Verify correct OTP code
+        # Verify correct OTP code after face verification
         res_verify_otp = self.client.post('/api/transfer/verify', data=json.dumps({
             'transaction_token': token,
             'otp': otp
         }), content_type='application/json')
         self.assertEqual(res_verify_otp.status_code, 200)
         data_verify_otp = json.loads(res_verify_otp.data)
-        self.assertEqual(data_verify_otp['status'], 'otp_ok_need_face')
-
-        # Run face verification check (which auto finalizes because OTP is verified!)
-        mock_liveness.return_value = True
-        mock_similarity.return_value = (True, 0.98, 0.363)
-        
-        self.client.post('/api/biometric/verify/initiate')
-        res_verify_face = self.client.post('/api/biometric/verify/check', data=json.dumps({
-            'image': 'some_face_b64'
-        }), content_type='application/json')
-        
-        self.assertEqual(res_verify_face.status_code, 200)
-        data_verify_face = json.loads(res_verify_face.data)
-        self.assertEqual(data_verify_face['status'], 'success') # Auto finalization success!
+        self.assertEqual(data_verify_otp['status'], 'success') # Auto finalization success!
         
         # Verify balances inside database
         with app.app_context():
@@ -1252,7 +1252,6 @@ class BankAppTestCase(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = json.loads(res.data)
         self.assertEqual(data['status'], 'verification_required')
-        self.assertIn('otp', data['required'])
         self.assertIn('face', data['required'])
         self.assertLess(duration, 15.0)
 

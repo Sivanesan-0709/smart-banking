@@ -158,6 +158,7 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
     import urllib.error
     import json
     import os
+    import traceback
 
     brevo_api_key = os.environ.get('BREVO_API_KEY')
     if not brevo_api_key:
@@ -173,7 +174,9 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
     )
     sender_name = os.environ.get('BREVO_SENDER_NAME', 'Smart Banking')
 
-    print(f"[BREVO DEBUG] BREVO_API_KEY present: {bool(brevo_api_key)}", flush=True)
+    masked_key = (brevo_api_key[:6] + "..." + brevo_api_key[-6:]) if len(brevo_api_key) >= 12 else "INVALID_KEY_LENGTH"
+
+    print(f"[BREVO DEBUG] BREVO_API_KEY present: {bool(brevo_api_key)} ({masked_key})", flush=True)
     print(f"[BREVO DEBUG] BREVO_SENDER_EMAIL value: {os.environ.get('BREVO_SENDER_EMAIL')}", flush=True)
     print(f"[BREVO DEBUG] Actual sender email placed into JSON payload: {sender_email}", flush=True)
     print(f"[BREVO DEBUG] Recipient email: {recipient_email}", flush=True)
@@ -203,6 +206,18 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
     if html_body:
         payload["htmlContent"] = html_body
 
+    # Task 4 & Task 8: Print Complete Payload & Request Info before urlopen
+    print("\n--- [BREVO FORENSIC DEBUG: REQUEST PAYLOAD & HEADERS] ---", flush=True)
+    print(f"URL: {url}", flush=True)
+    masked_headers = dict(headers)
+    masked_headers["api-key"] = masked_key
+    print(f"Headers: {json.dumps(masked_headers, indent=2)}", flush=True)
+    print("JSON Payload:", flush=True)
+    print(json.dumps(payload, indent=2), flush=True)
+    print(f"Sender Email: {sender_email}", flush=True)
+    print(f"Recipient Email: {recipient_email}", flush=True)
+    print("-----------------------------------------------------------\n", flush=True)
+
     try:
         req = urllib.request.Request(
             url,
@@ -213,7 +228,9 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
         with urllib.request.urlopen(req, timeout=10.0) as response:
             status_code = response.getcode()
             res_body = response.read().decode('utf-8')
+            # Task 1: Log complete response body
             print(f"[BREVO DEBUG] HTTP status={status_code}", flush=True)
+            print(f"[BREVO DEBUG] Full response body: {res_body}", flush=True)
             try:
                 res_json = json.loads(res_body)
                 msg_id = res_json.get('messageId')
@@ -229,10 +246,14 @@ def send_email_brevo_api(recipient_email, subject, plain_text, html_body=None):
             err_content = e.read().decode('utf-8')
         except Exception:
             pass
-        print(f"[BREVO API] HTTP status={e.code} error={err_content[:200]}", flush=True)
+        print(f"[BREVO FORENSIC ERROR] HTTP status={e.code}", flush=True)
+        print(f"[BREVO FORENSIC ERROR] Response body: {err_content}", flush=True)
+        print(f"[BREVO FORENSIC ERROR] Exception text: {str(e)}", flush=True)
+        print(f"[BREVO FORENSIC ERROR] Traceback:\n{traceback.format_exc()}", flush=True)
         return False, f"BREVO_HTTP_{e.code}"
     except Exception as e:
-        print(f"[BREVO API] Exception during delivery: {type(e).__name__} - {e}", flush=True)
+        print(f"[BREVO FORENSIC ERROR] Exception during delivery: {type(e).__name__} - {e}", flush=True)
+        print(f"[BREVO FORENSIC ERROR] Traceback:\n{traceback.format_exc()}", flush=True)
         return False, f"BREVO_ERROR_{type(e).__name__}"
 
 
@@ -546,36 +567,61 @@ Thank you."""
     dispatch_email_async(recipient_email, subject, plain_text, html_body)
     return True
 
-def send_transfer_email(recipient_email, tx_id, amount, receiver):
+def send_transfer_email(recipient_email, tx_id, amount, receiver, risk_level="Low", security_method="Standard OTP Verification", remaining_balance=None):
     customer_name = "Valued Customer"
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT FIRSTNAME, LASTNAME FROM NEWBANK WHERE EMAIL = %s", (recipient_email,))
+        cursor.execute("SELECT FIRSTNAME, LASTNAME, BAL FROM NEWBANK WHERE EMAIL = %s", (recipient_email,))
         user_row = cursor.fetchone()
         conn.close()
         if user_row:
             customer_name = f"{user_row['FIRSTNAME']} {user_row['LASTNAME']}"
+            if remaining_balance is None:
+                remaining_balance = user_row['BAL']
     except Exception as e:
         print(f"[WARN] Failed to fetch customer name for transfer email: {e}", flush=True)
 
-    subject = "Fund Transfer Successful"
-    dt_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject = "Transaction Successful"
+    dt_str = datetime.datetime.now().strftime("%d-%b-%Y %I:%M %p")
+    rem_bal_str = f"\nRemaining Balance: ₹{remaining_balance:,.2f}" if remaining_balance is not None else ""
+
     plain_text = f"""Dear {customer_name},
 
-Your fund transfer was completed successfully.
+Your transaction was completed successfully.
 
+Recipient: {receiver}
+Transferred Amount: ₹{amount:,.2f}
+Risk Level: {risk_level}
+Security Method Used: {security_method}{rem_bal_str}
 Transaction ID: {tx_id}
 Date & Time: {dt_str}
-Amount: ₹{amount:,.2f}
-Receiver: {receiver}
-Status: SUCCESS
 
-Thank you for banking with Smart Banking."""
+Thank you for using Smart Banking."""
 
     html_body = build_html_email(f"""<p>Dear {customer_name},</p>
-<p>Your fund transfer was completed successfully.</p>
+<p>Your transaction was completed successfully.</p>
 <div class="details-box">
+  <div class="details-row">
+    <span class="details-label">Recipient:</span>
+    <span class="details-value">{receiver}</span>
+  </div>
+  <div class="details-row">
+    <span class="details-label">Transferred Amount:</span>
+    <span class="details-value">₹{amount:,.2f}</span>
+  </div>
+  <div class="details-row">
+    <span class="details-label">Risk Level:</span>
+    <span class="details-value">{risk_level}</span>
+  </div>
+  <div class="details-row">
+    <span class="details-label">Security Method Used:</span>
+    <span class="details-value">{security_method}</span>
+  </div>
+  <div class="details-row">
+    <span class="details-label">Remaining Balance:</span>
+    <span class="details-value">₹{remaining_balance:,.2f}</span>
+  </div>
   <div class="details-row">
     <span class="details-label">Transaction ID:</span>
     <span class="details-value">{tx_id}</span>
@@ -584,20 +630,8 @@ Thank you for banking with Smart Banking."""
     <span class="details-label">Date & Time:</span>
     <span class="details-value">{dt_str}</span>
   </div>
-  <div class="details-row">
-    <span class="details-label">Amount:</span>
-    <span class="details-value">₹{amount:,.2f}</span>
-  </div>
-  <div class="details-row">
-    <span class="details-label">Receiver:</span>
-    <span class="details-value">{receiver}</span>
-  </div>
-  <div class="details-row">
-    <span class="details-label">Status:</span>
-    <span class="details-value">SUCCESS</span>
-  </div>
 </div>
-<p>Thank you for banking with Smart Banking.</p>""")
+<p>Thank you for using Smart Banking.</p>""")
 
     dispatch_email_async(recipient_email, subject, plain_text, html_body)
     return True
@@ -2467,17 +2501,20 @@ def biometric_verify_check():
         VALUES (%s, %s, %s, %s, 'PASSED', %s, '1.0', %s, %s, %s, %s, CURRENT_TIMESTAMP)
         ''', (user_id, result_str, similarity, threshold, challenge, meta['path'], meta['hash'], meta['width'], meta['height']))
         
+        token = session.get('mfa_pending_token') or (data.get('transaction_token') if data else None)
+        ptx = None
+        if token:
+            cursor.execute("SELECT otp_verified, face_verified, risk_level, status, decision_trace, amount FROM pending_transactions WHERE token = %s", (token,))
+            ptx = cursor.fetchone()
+
         if is_match:
             # Mark face_verified in pending transaction
-            token = session.get('mfa_pending_token') or (data.get('transaction_token') if data else None)
             if token:
                 cursor.execute("UPDATE pending_transactions SET face_verified = 1 WHERE token = %s", (token,))
                 
             # Check if transaction can be finalized now
             should_finalize = False
-            if token:
-                cursor.execute("SELECT otp_verified, face_verified, risk_level, status, decision_trace, amount FROM pending_transactions WHERE token = %s", (token,))
-                ptx = cursor.fetchone()
+            if token and ptx:
                 if ptx:
                     trace = {}
                     try:
@@ -2553,6 +2590,59 @@ def biometric_verify_check():
                     "reference_id": dep_ref
                 })
 
+            if token and ptx and ptx['status'] == 'PENDING_FACE_VERIFICATION':
+                # FEATURE 2 WORKFLOW: Face Verification Succeeded -> Generate & Send OTP NOW
+                otp = f"{secrets.randbelow(1000000):06d}"
+                otp_hashed = hash_otp(otp)
+                expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+
+                cursor.execute('''
+                INSERT INTO transaction_otp_challenges (user_id, transaction_token, otp_hash, expires_at, last_sent_at)
+                VALUES (%s, %s, %s, %s, datetime('now'))
+                ''', (user_id, token, otp_hashed, expires_at))
+
+                cursor.execute('''
+                UPDATE pending_transactions 
+                SET face_verified = 1, status = 'PENDING_OTP'
+                WHERE token = %s AND user_id = %s
+                ''', (token, user_id))
+
+                cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = %s", (user_id,))
+                u_row = cursor.fetchone()
+                u_email = u_row['EMAIL'] if u_row else session.get('email', '')
+
+                p_amount = ptx['amount']
+                p_receiver = ptx['receiver'] if 'receiver' in ptx.keys() else 'Recipient'
+
+                conn.commit()
+                conn.close()
+
+                mail_ok = send_otp_email(u_email, otp, p_amount, p_receiver)
+                simulated_otp = None
+                sim_msg = None
+                if os.environ.get('EMAIL_SIMULATION_MODE') == '1' or not mail_ok:
+                    simulated_otp = otp
+                    sim_msg = f"Email service unavailable. Simulation Mode Enabled. Your OTP is: {otp}"
+
+                resp_data = {
+                    "status": "otp_required",
+                    "message": "Face Verification Successful. OTP generated and sent to your registered email.",
+                    "transaction_token": token,
+                    "similarity": round(similarity * 100, 2),
+                    "threshold": threshold,
+                    "progress": [
+                        "Risk Analysis Complete",
+                        "Face Verification Required",
+                        "Face Verified",
+                        "OTP Generated"
+                    ]
+                }
+                if simulated_otp:
+                    resp_data["simulated_otp"] = simulated_otp
+                    resp_data["simulation_message"] = sim_msg
+
+                return jsonify(resp_data), 200
+
             conn.commit()
             conn.close()
             
@@ -2571,10 +2661,29 @@ def biometric_verify_check():
             INSERT INTO biometric_security_events (user_id, event_type, severity, metadata)
             VALUES (%s, 'FACE_MISMATCH', 'HIGH', %s)
             ''', (user_id, f"Similarity: {similarity:.4f} below threshold: {threshold:.4f}"))
-            
+
+            if token and ptx:
+                cursor.execute('''
+                UPDATE pending_transactions 
+                SET status = 'BLOCKED_FACE_FAILED' 
+                WHERE token = %s AND user_id = %s
+                ''', (token, user_id))
+                conn.commit()
+                conn.close()
+                return jsonify({
+                    "status": "blocked",
+                    "message": "Face verification failed. Transaction has been blocked.",
+                    "similarity": round(similarity * 100, 2),
+                    "threshold": threshold,
+                    "progress": [
+                        "Risk Analysis Complete",
+                        "Face Verification Failed",
+                        "Transaction Blocked"
+                    ]
+                }), 400
+
             conn.commit()
             conn.close()
-            
             return jsonify({
                 "status": "mismatch",
                 "message": "Biometric verification failed. Face does not match the enrolled owner.",
@@ -3153,7 +3262,36 @@ def transfer_initiate():
                 "reasons": reasons
             })
 
-        # MEDIUM/HIGH RISK: Needs Verification (OTP / Biometric Face)
+        # HIGH RISK WORKFLOW FEATURE 2: Face Verification BEFORE OTP Generation
+        if risk_level == 'HIGH':
+            decision_trace['auth_required'] = ['face', 'otp']
+            cursor.execute('''
+            INSERT INTO pending_transactions (token, user_id, receiver, amount, ttype, risk_score, risk_level, reasons, is_fraud_predicted, expires_at, status, decision_trace)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING_FACE_VERIFICATION', %s)
+            ''', (token, sender_id, receiver, amount, ttype, risk_score, risk_level, json.dumps(reasons), is_fraud_predicted, expires_at, json.dumps(decision_trace)))
+            conn.commit()
+            conn.close()
+
+            parts = sender_email.split('@')
+            masked_email = f"{parts[0][0]}***@{parts[1]}"
+            return jsonify({
+                "status": "verification_required",
+                "required": ["face"],
+                "current_step": "face",
+                "transaction_token": token,
+                "masked_email": masked_email,
+                "expires_in": 300,
+                "score": risk_score,
+                "level": "HIGH",
+                "reasons": reasons,
+                "message": "High-risk transaction detected. Face Verification Required before OTP generation.",
+                "progress": [
+                    "Risk Analysis Complete",
+                    "Face Verification Required"
+                ]
+            }), 200
+
+        # MEDIUM RISK WORKFLOW: Generate OTP immediately
         t_otp_gen = time.time()
         otp = f"{secrets.randbelow(1000000):06d}"
         otp_hashed = hash_otp(otp)
@@ -3268,13 +3406,13 @@ def transfer_initiate():
         print(f"[DEBUG] [Step 10: SMTP email send completed] took {time.time() - t_mail:.4f}s", flush=True)
 
         required_auths = ["otp"]
-        if risk_level == 'HIGH' or is_high_value:
-            required_auths.append("face")
+        simulated_otp = None
+        sim_msg = None
+        if os.environ.get('EMAIL_SIMULATION_MODE') == '1' or not mail_ok:
+            simulated_otp = otp
+            sim_msg = f"Email service unavailable. Simulation Mode Enabled. Your OTP is: {otp}"
 
-        print(f"[DEBUG] [Step 14: JSON response returned ({risk_level})]", flush=True)
-        print("END /api/transfer/initiate", flush=True)
-        print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
-        return jsonify({
+        resp_payload = {
             "status": "verification_required",
             "required": required_auths,
             "transaction_token": token,
@@ -3282,8 +3420,20 @@ def transfer_initiate():
             "expires_in": 300,
             "score": risk_score,
             "level": risk_level,
-            "reasons": reasons
-        })
+            "reasons": reasons,
+            "progress": [
+                "Risk Analysis Complete",
+                "OTP Generated"
+            ]
+        }
+        if simulated_otp:
+            resp_payload["simulated_otp"] = simulated_otp
+            resp_payload["simulation_message"] = sim_msg
+
+        print(f"[DEBUG] [Step 14: JSON response returned ({risk_level})]", flush=True)
+        print("END /api/transfer/initiate", flush=True)
+        print(f"TOTAL REQUEST TIME: {time.time() - start_time:.4f}s", flush=True)
+        return jsonify(resp_payload)
 
     except Exception as e:
         traceback.print_exc()
@@ -3371,13 +3521,13 @@ def transfer_verify():
         WHERE token = %s
         ''', (token,))
         
-        cursor.execute("SELECT risk_level FROM pending_transactions WHERE token = %s", (token,))
+        cursor.execute("SELECT risk_level, face_verified FROM pending_transactions WHERE token = %s", (token,))
         pending_row = cursor.fetchone()
         
         conn.commit()
         conn.close()
         
-        if pending_row['risk_level'] == 'MEDIUM':
+        if pending_row and (pending_row['risk_level'] in ['MEDIUM', 'LOW'] or pending_row['face_verified']):
             return finalize_pending_transaction(token)
             
         session['mfa_pending_token'] = token
@@ -3501,7 +3651,7 @@ def finalize_pending_transaction(token):
             conn.close()
             return jsonify({"status": "error", "message": "Pending transaction details not found."}), 404
             
-        if pending['status'] != 'PENDING':
+        if pending['status'] not in ['PENDING', 'PENDING_OTP', 'PENDING_FACE_VERIFICATION']:
             cursor.execute("ROLLBACK")
             conn.close()
             return jsonify({"status": "error", "message": "Transaction has already been processed or expired."}), 400
@@ -3573,7 +3723,7 @@ def finalize_pending_transaction(token):
         if ttype == 'ADD_MONEY':
             cursor.execute("UPDATE deposits SET status = 'APPROVED', balance_after = %s WHERE reference_id = %s", (sender_new_bal, token))
             
-        cursor.execute("UPDATE pending_transactions SET status = 'COMPLETED' WHERE token = ?", (token,))
+        cursor.execute("UPDATE pending_transactions SET status = 'COMPLETED' WHERE token = %s", (token,))
         
         # Audit logging for completed transactions
         log_metadata = {"amount": amount, "sender": sender, "receiver": receiver, "token": token, "risk_score": pending['risk_score']}
@@ -3649,14 +3799,21 @@ def finalize_pending_transaction(token):
         socketio.emit('new_transaction', tx_event, to='admin_room')
         
         conn.commit()
-        if ttype == 'ADD_MONEY':
-            try:
-                cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = %s", (sender_id,))
-                email_row = cursor.fetchone()
-                if email_row and email_row['EMAIL']:
-                    send_deposit_email(email_row['EMAIL'], token, amount, sender_bal, sender_new_bal)
-            except Exception as ee:
-                print("[WARN] Failed to send deposit confirmation email", ee)
+        try:
+            cursor.execute("SELECT EMAIL FROM NEWBANK WHERE ID = %s", (sender_id,))
+            email_row = cursor.fetchone()
+            if email_row and email_row['EMAIL']:
+                user_email = email_row['EMAIL']
+                if ttype == 'ADD_MONEY':
+                    send_deposit_email(user_email, token, amount, sender_bal, sender_new_bal)
+                elif ttype in ['TRANSFER', 'QR_PAYMENT']:
+                    p_dict = dict(pending) if pending else {}
+                    r_level = p_dict.get('risk_level', 'Medium') or 'Medium'
+                    is_face = bool(p_dict.get('face_verified', 0))
+                    s_method = "Face Verification + OTP" if (r_level == 'HIGH' or is_face) else "OTP Verification"
+                    send_transfer_email(user_email, tx_id, amount, receiver, r_level, s_method, sender_new_bal)
+        except Exception as ee:
+            print("[WARN] Failed to send transaction confirmation email:", ee, flush=True)
         conn.close()
         
         session.pop('mfa_pending_token', None)
@@ -6788,7 +6945,6 @@ def admin_trigger_monthly_statements():
             
             subject = f"Your Smart Banking Monthly Activity Summary"
             plain_text = f"""Dear {u['FIRSTNAME']} {u['LASTNAME']},
-
 Here is your monthly account statement summary:
 
 Opening Balance: Rs {opening_bal:,.2f}
